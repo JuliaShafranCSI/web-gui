@@ -1,0 +1,25 @@
+services:
+  gui:
+    build: ./gui
+    ports:
+      - "5000:5000"
+    networks:
+      - kafka-net
+    volumes:
+      - ../shared_files:/data/shared
+      - models_volume:/home/workspace/models_volume
+    environment:
+      - REDIS_HOST=redis-stack
+      - REDIS_URL=redis://redis-stack:6379/0
+      - FILES_VOLUME=/data/shared
+
+networks:
+  kafka-net:
+    external: true
+    name: scripts_kafka-net
+
+volumes:
+  shared_files:
+    external: true
+  models_volume:
+    external: true
