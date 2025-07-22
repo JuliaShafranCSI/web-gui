@@ -1,8 +1,12 @@
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 import os, redis, random, time, re, threading, cv2, numpy as np, struct
+from starlette.middleware.sessions import SessionMiddleware
+import psycopg2
 
 app = FastAPI()
+
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET_KEY", "super-secret"))
 
 redis_url = os.getenv("REDIS_URL", "redis://redis-stack:6379/0")
 r_txt = redis.Redis.from_url(redis_url)
@@ -19,7 +23,71 @@ def generate_uid():
 def sanitize_rtsp(url):
     return re.sub(r"rtsp://[^@]*@", "rtsp://@", url, count=1)
 
+def authenticate_user_sql(username, password):
+    # Placeholder for SQL authentication logic
+    # In a real application, you would query your database here
+    # return username == "user" and password == "password"
+    try:
+        conn = psycopg2.connect(
+            dbname=os.getenv("PG_DBNAME", "your_db"),
+            user=os.getenv("PG_USER", "your_user"),
+            password=os.getenv("PG_PASSWORD", "your_password"),
+            host=os.getenv("PG_HOST", "localhost"),
+            port=os.getenv("PG_PORT", "5432")
+        )
+        cur = conn.cursor()
+        # IMPORTANT: Use parameterized queries to prevent SQL injection
+        cur.execute("SELECT * FROM users WHERE username = %s AND password = %s", (username, password))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        return user is not None
+    except Exception as e:
+        print(f"Database connection or query error: {e}")
+        return False
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_get():
+    return LOGIN_HTML
+
+@app.post("/login")
+def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
+    if authenticate_user_sql(username, password):
+        request.session["authenticated"] = True
+        return RedirectResponse(url="/", status_code=303)
+    else:
+        # In a real app, you'd show an error message on the login page
+        return RedirectResponse(url="/login", status_code=303)
+
+@app.get("/logout")
+def logout(request: Request):
+    request.session.pop("authenticated", None)
+    return RedirectResponse(url="/login", status_code=303)
+
 # ---- HTML snippets ----
+LOGIN_HTML = """<!DOCTYPE html><html><head>
+<meta charset='utf-8'><title>Login</title>
+<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+</head><body class='bg-light d-flex justify-content-center py-5'>
+<div class='card shadow-sm w-100' style='max-width:400px;'>
+ <div class='card-body'>
+  <h5 class='mb-4'>Login</h5>
+  <form method='post' action='/login'>
+   <div class='mb-3'>
+    <label class='form-label'>Username</label>
+    <input type='text' class='form-control' name='username' required>
+   </div>
+   <div class='mb-3'>
+    <label class='form-label'>Password</label>
+    <input type='password' class='form-control' name='password' required>
+   </div>
+   <button type='submit' class='btn btn-primary w-100'>Login</button>
+  </form>
+ </div>
+</div>
+</body></html>"""
+
 FORM_HTML = """<!DOCTYPE html><html><head>
 <meta charset='utf-8'><title>Add Video Source</title>
 <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
@@ -35,6 +103,7 @@ FORM_HTML = """<!DOCTYPE html><html><head>
    <button type='submit' class='btn btn-primary px-4'>Add</button>
    <a href='/' class='btn btn-outline-secondary ms-2'>Cancel</a>
   </form>
+  <a href='/logout' class='btn btn-danger mt-3'>Logout</a>
  </div>
 </div>
 </body></html>"""
@@ -65,7 +134,9 @@ poll();
 
 
 @app.get("/", response_class=HTMLResponse)
-def home():
+def home(request: Request):
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/login", status_code=303)
     return FORM_HTML
 
 @app.post("/add")
@@ -80,7 +151,9 @@ def add(video_url: str = Form(...)):
     return RedirectResponse(f"/stream?pid={pid}", status_code=303)
 
 @app.get("/stream", response_class=HTMLResponse)
-def stream():
+def stream(request: Request):
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/login", status_code=303)
     return HTMLResponse(STREAM_HTML)
 
 # -------- frame fetching with retry / skip logic ----------
