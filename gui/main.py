@@ -2,7 +2,11 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 import os, redis, random, time, re, threading, cv2, numpy as np, struct
 from starlette.middleware.sessions import SessionMiddleware
-import psycopg2
+from User_Authentication import load_env, authenticate_user_sql
+from typing import Optional
+from urllib.parse import quote_plus
+
+load_env("./.env")
 
 app = FastAPI()
 
@@ -23,33 +27,20 @@ def generate_uid():
 def sanitize_rtsp(url):
     return re.sub(r"rtsp://[^@]*@", "rtsp://@", url, count=1)
 
-def authenticate_user_sql(username, password):
-    # Placeholder for SQL authentication logic
-    # In a real application, you would query your database here
-    # return username == "user" and password == "password"
-    try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("PG_DBNAME", "your_db"),
-            user=os.getenv("PG_USER", "your_user"),
-            password=os.getenv("PG_PASSWORD", "your_password"),
-            host=os.getenv("PG_HOST", "localhost"),
-            port=os.getenv("PG_PORT", "5432")
-        )
-        cur = conn.cursor()
-        # IMPORTANT: Use parameterized queries to prevent SQL injection
-        cur.execute("SELECT * FROM users WHERE username = %s AND password = %s", (username, password))
-        user = cur.fetchone()
-        cur.close()
-        conn.close()
-        return user is not None
-    except Exception as e:
-        print(f"Database connection or query error: {e}")
-        return False
+
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_get():
-    return LOGIN_HTML
+def login_get(request: Request, error: Optional[str] = None):
+    modified_html = LOGIN_HTML
+    
+    if error:
+        # Replace the hidden class and insert the error message (correcting quotes)
+        modified_html = modified_html.replace(
+            "<div id='error-message' class='alert alert-danger d-none' role='alert'></div>",
+            f"<div id='error-message' class='alert alert-danger d-block' role='alert'>{error}</div>"
+        )
+    return modified_html
 
 @app.post("/login")
 def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
@@ -57,8 +48,9 @@ def login_post(request: Request, username: str = Form(...), password: str = Form
         request.session["authenticated"] = True
         return RedirectResponse(url="/", status_code=303)
     else:
-        # In a real app, you'd show an error message on the login page
-        return RedirectResponse(url="/login", status_code=303)
+        # Pass error message via query parameter
+        error_message = "Invalid username or password."
+        return RedirectResponse(url=f"/login?error={quote_plus(error_message)}", status_code=303)
 
 @app.get("/logout")
 def logout(request: Request):
@@ -73,6 +65,7 @@ LOGIN_HTML = """<!DOCTYPE html><html><head>
 <div class='card shadow-sm w-100' style='max-width:400px;'>
  <div class='card-body'>
   <h5 class='mb-4'>Login</h5>
+  <div id='error-message' class='alert alert-danger d-none' role='alert'></div>
   <form method='post' action='/login'>
    <div class='mb-3'>
     <label class='form-label'>Username</label>
