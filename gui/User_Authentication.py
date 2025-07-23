@@ -88,5 +88,5 @@ if __name__ == "__main__":
     print(f"PG_PASSWORD: {os.getenv('PG_PASSWORD')}")
     print(f"PG_HOST: {os.getenv('PG_HOST')}")
     print(f"PG_PORT: {os.getenv('PG_PORT')}")
-    print(authenticate_user_sql("edwin", "csi.123"))
+
 
