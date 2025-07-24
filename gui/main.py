@@ -1,10 +1,18 @@
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
-import os, redis, random, time, re, threading, cv2, numpy as np, struct
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
+import os, redis, random, time, re, threading, cv2, numpy as np, struct, psycopg2, asyncio, base64
 from starlette.middleware.sessions import SessionMiddleware
 from User_Authentication import load_env, authenticate_user_sql
 from typing import Optional
 from urllib.parse import quote_plus
+
+# ----- Configuration ----------------------------
+PID         = 12345678                                  # demo PID for stream
+LIST_KEY    = f"raw_buffer_{PID}_Video1"
+ZSET_KEY    = f"res_buffer_{PID}_Video1"
+POLL_MS     = 200                                        # ms
+MAX_WAIT_SEC= 10
+# -----------------------------------------------
 
 load_env("./.env")
 
@@ -16,18 +24,8 @@ redis_url = os.getenv("REDIS_URL", "redis://redis-stack:6379/0")
 r_txt = redis.Redis.from_url(redis_url)
 r_bin = redis.Redis.from_url(redis_url, decode_responses=False)
 
-shared_dir = os.getenv("FILES_VOLUME", "/data/shared")
-os.makedirs(shared_dir, exist_ok=True)
-config_path = os.path.join(shared_dir, "process_config.conf")
-file_lock = threading.Lock()
-
-def generate_uid():
-    return int(time.time()*1000)%1_000_000 + random.randint(100000, 999999)
-
-def sanitize_rtsp(url):
-    return re.sub(r"rtsp://[^@]*@", "rtsp://@", url, count=1)
-
-
+latest_pair: tuple[np.ndarray, np.ndarray] | None = None
+pending: dict[float, tuple[np.ndarray, float]] = {}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -46,7 +44,7 @@ def login_get(request: Request, error: Optional[str] = None):
 def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
     if authenticate_user_sql(username, password):
         request.session["authenticated"] = True
-        return RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url="/stream", status_code=303)
     else:
         # Pass error message via query parameter
         error_message = "Invalid username or password."
@@ -56,6 +54,27 @@ def login_post(request: Request, username: str = Form(...), password: str = Form
 def logout(request: Request):
     request.session.pop("authenticated", None)
     return RedirectResponse(url="/login", status_code=303)
+
+@app.get('/stream', response_class=HTMLResponse)
+def stream(request: Request):
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/login", status_code=303)
+    return HTMLResponse(STREAM_HTML)
+
+@app.get('/frames')
+async def frames(request: Request):
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/login", status_code=303)
+    try:
+        if latest_pair is None:
+            return Response(status_code=204)
+        raw_img, res_img = latest_pair
+    except asyncio.TimeoutError:
+        return Response(status_code=204)
+    b1, b2 = img_to_b64(raw_img), img_to_b64(res_img)
+    if not b1 or not b2:
+        return Response(status_code=204)
+    return JSONResponse({'raw': b1, 'res': b2}, headers={'Cache-Control':'no-store'})
 
 # ---- HTML snippets ----
 LOGIN_HTML = """<!DOCTYPE html><html><head>
@@ -81,49 +100,59 @@ LOGIN_HTML = """<!DOCTYPE html><html><head>
 </div>
 </body></html>"""
 
-FORM_HTML = """<!DOCTYPE html><html><head>
-<meta charset='utf-8'><title>Add Video Source</title>
-<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
-</head><body class='bg-light d-flex justify-content-center py-5'>
-<div class='card shadow-sm w-100' style='max-width:800px;'>
- <div class='card-body'>
-  <h5 class='mb-4'>Add Video Source</h5>
-  <form method='post' action='/add'>
-   <div class='mb-4'>
-    <label class='form-label'>Video Source</label>
-    <input type='url' class='form-control' name='video_url' placeholder='rtsp://...' required>
-   </div>
-   <button type='submit' class='btn btn-primary px-4'>Add</button>
-   <a href='/' class='btn btn-outline-secondary ms-2'>Cancel</a>
-  </form>
-  <a href='/logout' class='btn btn-danger mt-3'>Logout</a>
- </div>
-</div>
-</body></html>"""
-
 
 STREAM_HTML = """<!DOCTYPE html><html><head>
-<meta charset='utf-8'><title>Stream</title>
+<meta charset='utf-8'><title>Live Stream</title>
 <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
-<style>img{max-width:100%;height:auto;}</style>
-</head><body class='bg-light d-flex flex-column align-items-center py-4'>
+<style>
+body{background:#f8f9fa;}
+h4{margin-bottom:2.5rem;}
+.wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
+img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
+</style>
+</head><body class='d-flex flex-column align-items-center py-4'>
 <h4>Live Stream</h4>
-<img id='frame' class='border rounded shadow-sm'/>
+<div class='wrap'>
+  <img id='raw' class='frame'><img id='res' class='frame'>
+</div>
+<a href='/logout' class='btn btn-danger mt-4'>Logout</a>
 <script>
-const pid=new URLSearchParams(window.location.search).get('pid');
+const raw=document.getElementById('raw'), res=document.getElementById('res');
 async function poll(){
-  const res=await fetch('/frame?pid='+pid);
-  if(res.status===200){
-     const blob=await res.blob();
-     if(blob.size>0){
-       document.getElementById('frame').src=URL.createObjectURL(blob);
-     }
-  }
+  try{
+    const resp=await fetch('/frames',{cache:'no-store'});
+    if(resp.ok){
+      const j=await resp.json();
+      raw.src=j.raw; res.src=j.res;
+      raw.style.visibility='visible'; res.style.visibility='visible';
+    }
+  }catch(_){}
   setTimeout(poll,200);
 }
 poll();
 </script>
 </body></html>"""
+
+# ----- Stream helper functions -----------------------------------
+def deserialize_frame(buf: bytes):
+    off = 0
+    slen = struct.unpack_from('<i', buf, off)[0]; off += 4
+    fid = float(buf[off:off+slen].decode()); off += slen
+    mtype = struct.unpack_from('<i', buf, off)[0]; off += 4
+    rows = struct.unpack_from('<i', buf, off)[0]; off += 4
+    cols = struct.unpack_from('<i', buf, off)[0]; off += 4
+    channels = ((mtype >> 3) & 0x3F) + 1
+    size = rows*cols*channels
+    img = np.frombuffer(buf[off:off+size], dtype=np.uint8).reshape((rows, cols, channels))
+    if img.ndim == 3 and img.shape[2] == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_YUV2BGR_YUY2)
+    return fid, img
+
+def img_to_b64(img: np.ndarray):
+    ok, enc = cv2.imencode('.jpg', img)
+    if not ok:
+        return None
+    return 'data:image/jpeg;base64,' + base64.b64encode(enc.tobytes()).decode()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -132,68 +161,36 @@ def home(request: Request):
         return RedirectResponse(url="/login", status_code=303)
     return FORM_HTML
 
-@app.post("/add")
-def add(video_url: str = Form(...)):
-    pid = generate_uid()
-    clean_url = sanitize_rtsp(video_url)
-    line = f"{pid} TYPE=VIDEO;LABEL=Video1;ANALYSIS_TYPE=SMART_PARKING_BRENTWOOD;USERNAME=root;DATA={clean_url};LOCAL_SAVE_PATH=NONE;\n"
-    with file_lock:
-        with open(config_path, 'w') as f:
-            f.write(line)
-    r_txt.publish('video_sources', clean_url)
-    return RedirectResponse(f"/stream?pid={pid}", status_code=303)
+# ----- Background tasks -----------------------------------------------
+async def list_consumer():
+    loop = asyncio.get_running_loop()
+    while True:
+        _, raw = await loop.run_in_executor(None, lambda: r_bin.blpop(LIST_KEY, 0))
+        fid, img = deserialize_frame(raw)
+        pending[fid] = (img, loop.time())
 
-@app.get("/stream", response_class=HTMLResponse)
-def stream(request: Request):
-    if not request.session.get("authenticated"):
-        return RedirectResponse(url="/login", status_code=303)
-    return HTMLResponse(STREAM_HTML)
+async def zset_matcher():
+    loop = asyncio.get_running_loop()
+    while True:
+        now = loop.time()
+        for fid in list(pending.keys()):
+            raw_img, ts = pending[fid]
+            zdata = await loop.run_in_executor(None,
+                     lambda fid=fid: r_bin.zrangebyscore(ZSET_KEY, fid, fid, 0, 1))
+            if zdata:
+                loop.run_in_executor(None, r_bin.zrem, ZSET_KEY, zdata[0])
+                _, res_img = deserialize_frame(zdata[0])
+                try:
+                    global latest_pair
+                    latest_pair = (raw_img, res_img)
+                except asyncio.QueueFull:
+                    pass
+                del pending[fid]
+            elif now - ts > MAX_WAIT_SEC:
+                del pending[fid]
+        await asyncio.sleep(POLL_MS/1000)
 
-# -------- frame fetching with retry / skip logic ----------
-MAX_RETRIES = 5
-RETRY_DELAY_MS = 200  # client polls every 200 ms, so server logic is per poll
-
-state = {}  # pid -> dict(index=int, retries=int)
-
-def deserialize(data: bytes):
-    off = 0
-    strlen = struct.unpack_from('<i', data, off)[0]; off+=4
-    s = data[off:off+strlen].decode(); off+=strlen
-    mat_type = struct.unpack_from('<i', data, off)[0]; off+=4
-    rows = struct.unpack_from('<i', data, off)[0]; off+=4
-    cols = struct.unpack_from('<i', data, off)[0]; off+=4
-    channels = {0:1, 16:2, 24:3, 32:4}.get(mat_type & 56, 1)
-    img_size = rows*cols*channels
-    img = np.frombuffer(data[off:off+img_size], dtype=np.uint8).reshape((rows, cols, channels))
-    return s, img
-
-@app.get("/frame")
-def frame(pid: int):
-    st = state.setdefault(pid, {'idx': 0, 'retry': 0})
-    key = f"res_buffer_{pid}_Video1"
-    idx = st['idx']
-    # try fetch exact score
-    data = r_bin.zrangebyscore(key, idx, idx, start=0, num=1)
-    if not data:
-        # if buffer empty, just wait without increasing retry
-        if r_bin.zcard(key) == 0:
-            return Response(status_code=204)
-        # else element missing
-        st['retry'] += 1
-        if st['retry'] > MAX_RETRIES:
-            # skip this index
-            st['idx'] += 1
-            st['retry'] = 0
-        return Response(status_code=204)
-    # have frame
-    r_bin.zrem(key, data[0])
-    st['idx'] += 1
-    st['retry'] = 0
-    try:
-        _, img = deserialize(data[0])
-        ok, jpeg = cv2.imencode('.jpg', img)
-        if not ok:
-            return Response(status_code=204)
-        return Response(content=jpeg.tobytes(), media_type='image/jpeg')
-    except Exception:
-        return Response(status_code=204)
+@app.on_event('startup')
+async def startup_tasks():
+    asyncio.create_task(list_consumer())
+    asyncio.create_task(zset_matcher())

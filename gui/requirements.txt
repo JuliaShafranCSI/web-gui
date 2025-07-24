@@ -5,5 +5,5 @@ python-multipart
 opencv-python-headless
 numpy
 itsdangerous
-psycopg
+psycopg2-binary
 bcrypt
