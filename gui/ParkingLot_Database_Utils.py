@@ -2,6 +2,8 @@ import psycopg
 import os
 from User_Authentication import load_env
 from psycopg_pool import ConnectionPool
+from datetime import datetime, timezone # Import datetime and timezone
+import time
 
 # Global connection pool
 pool = None
@@ -33,6 +35,10 @@ def close_connection_pool():
     if pool:
         pool.close()
         pool = None
+
+def get_utc_now():
+    """Returns the current timestamp in UTC."""
+    return datetime.now(timezone.utc)
 
 def insert_stalls_in_stalls_table(lot_id, stall_number, stall_type, current_status, is_operational):
     if not isinstance(lot_id, int):
@@ -174,6 +180,68 @@ def get_stall_id_using_stall_number_and_lot_id(stall_number, lot_id):
             pool.putconn(conn)
 
 
+
+def start_session(db_stall_id, timestamp_now,vehicle_identifier="default"):
+    global pool
+    pool = get_connection_pool()
+    if pool is None:
+        print("Error: Database connection pool not initialized.")
+        return 1
+    conn = None
+    cur = None
+    try:
+        conn = pool.getconn()            
+        cur = conn.cursor()
+
+        cur.execute("""INSERT INTO public.parkingsessions 
+                    (stall_id, entry_timestamp, vehicle_identifier) 
+                    VALUES (%s,%s,%s);""", 
+                    (db_stall_id, timestamp_now, vehicle_identifier))
+        conn.commit()
+        return 0
+    except Exception as e:
+        print(f"SQL command execution error: {e}")
+        return 1
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            pool.putconn(conn)
+
+def end_session(db_stall_id, timestamp_now):
+    global pool
+    pool = get_connection_pool()
+    if pool is None:
+        print("Error: Database connection pool not initialized.")
+        return 1
+    conn = None
+    cur = None
+    try:
+        conn = pool.getconn()
+        cur = conn.cursor()
+        cur.execute("""UPDATE public.parkingsessions
+                    SET exit_timestamp = %s
+                    WHERE session_id = (
+                        SELECT session_id
+                        FROM public.parkingsessions
+                        WHERE stall_id = %s
+                        AND exit_timestamp IS NULL
+                        ORDER BY entry_timestamp DESC
+                        LIMIT 1
+                    );""", 
+                    (timestamp_now, db_stall_id))
+        conn.commit() # Corrected from conn.commit
+        return 0
+    except Exception as e:
+        print(f"SQL command execution error: {e}")
+        return 1
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            pool.putconn(conn)
+
+
 if __name__=='__main__':
     load_env("gui/.env")
     print(f"PG_DBNAME: {os.getenv('PG_DBNAME')}")
@@ -186,10 +254,17 @@ if __name__=='__main__':
     # if result == 0:
     #     print("Reset successful.")
 
-    vacant_list = get_all_vacant_stall_number_from_db(1)
-    print(vacant_list)
+    # vacant_list = get_all_vacant_stall_number_from_db(1)
+    # print(vacant_list)
     
-    print(get_stall_id_using_stall_number_and_lot_id("0",1))
+    # print(get_stall_id_using_stall_number_and_lot_id("0",1))
+
+    start_session(1, datetime.now(timezone.utc),vehicle_identifier="default")
+    print("Session started")
+    time.sleep(3)
+    end_session(1, datetime.now(timezone.utc))
+    print("Session stopped")
+
     close_connection_pool()
 
 

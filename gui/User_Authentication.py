@@ -1,4 +1,4 @@
-import psycopg2
+import psycopg
 import os
 import bcrypt
 
@@ -88,5 +88,7 @@ if __name__ == "__main__":
     print(f"PG_PASSWORD: {os.getenv('PG_PASSWORD')}")
     print(f"PG_HOST: {os.getenv('PG_HOST')}")
     print(f"PG_PORT: {os.getenv('PG_PORT')}")
+
+    
 
 
