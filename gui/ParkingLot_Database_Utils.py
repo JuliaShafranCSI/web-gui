@@ -241,6 +241,43 @@ def end_session(db_stall_id, timestamp_now):
         if conn:
             pool.putconn(conn)
 
+def update_stall_status(lot_id, db_stall_id, status):
+    if not isinstance(lot_id, int):
+        print("The first arguement must be an integer")
+        return 1
+    if not isinstance(db_stall_id, int):
+        print("The second arguement must be an integer")
+        return 1
+    acceptable_status = ["Vacant", "Occupied"]
+    if status not in acceptable_status:
+        print("Status must be 'Vacant' or 'Occupied'")
+        return 1
+    global pool
+    pool = get_connection_pool()
+    if pool is None:
+        print("Error: Database connection pool not initialized.")
+        return 1
+    conn = None
+    cur = None
+    try:
+        conn = pool.getconn()            
+        cur = conn.cursor()
+        cur.execute("""UPDATE public.stalls SET current_status = %s 
+                    WHERE lot_id = %s and stall_id = %s;""", (status, lot_id, db_stall_id))
+        conn.commit()
+        return 0
+    except Exception as e:
+        print(f"SQL command execution error: {e}")
+        return 1
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            pool.putconn(conn)
+
+
+    
+
 
 if __name__=='__main__':
     load_env("gui/.env")
@@ -250,20 +287,26 @@ if __name__=='__main__':
     print(f"PG_HOST: {os.getenv('PG_HOST')}")
     print(f"PG_PORT: {os.getenv('PG_PORT')}")
     
-    # result = reset_all_stalls()
-    # if result == 0:
-    #     print("Reset successful.")
+    result = reset_all_stalls()
+    if result == 0:
+        print("Reset successful.")
 
     # vacant_list = get_all_vacant_stall_number_from_db(1)
     # print(vacant_list)
     
     # print(get_stall_id_using_stall_number_and_lot_id("0",1))
 
-    start_session(1, datetime.now(timezone.utc),vehicle_identifier="default")
-    print("Session started")
-    time.sleep(3)
-    end_session(1, datetime.now(timezone.utc))
-    print("Session stopped")
+    # start_session(1, datetime.now(timezone.utc),vehicle_identifier="default")
+    # print("Session started")
+    # time.sleep(3)
+    # end_session(1, datetime.now(timezone.utc))
+    # print("Session stopped")
+
+    # result=update_stall_status(1,1,"Occupied")
+    # if result ==0:
+    #     print("Status updated")
+
+
 
     close_connection_pool()
 
