@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
-import os, redis, random, time, re, threading, cv2, numpy as np, struct, psycopg2, asyncio, base64
+import os, redis, random, time, re, threading, cv2, numpy as np, struct, asyncio, base64
 from starlette.middleware.sessions import SessionMiddleware
 from User_Authentication import load_env, authenticate_user_sql
 from typing import Optional
