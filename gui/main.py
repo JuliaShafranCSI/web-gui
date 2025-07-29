@@ -11,7 +11,7 @@ PID         = 12345678                                  # demo PID for stream
 LIST_KEY    = f"raw_buffer_{PID}_Video1"
 ZSET_KEY    = f"res_buffer_{PID}_Video1"
 POLL_MS     = 200                                        # ms
-MAX_WAIT_SEC= 10
+MAX_WAIT_SEC= 30
 # -----------------------------------------------
 
 load_env("./.env")
@@ -109,13 +109,14 @@ body{background:#f8f9fa;}
 h4{margin-bottom:2.5rem;}
 .wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
 img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
+.logout-btn{position:absolute;top:2rem;right:2rem;z-index:10;}
 </style>
 </head><body class='d-flex flex-column align-items-center py-4'>
+<a href='/logout' class='btn btn-danger logout-btn'>Logout</a>
 <h4>Live Stream</h4>
 <div class='wrap'>
   <img id='raw' class='frame'><img id='res' class='frame'>
 </div>
-<a href='/logout' class='btn btn-danger mt-4'>Logout</a>
 <script>
 const raw=document.getElementById('raw'), res=document.getElementById('res');
 async function poll(){
