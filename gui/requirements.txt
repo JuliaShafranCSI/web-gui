@@ -7,3 +7,5 @@ numpy
 itsdangerous
 psycopg[binary,pool]
 bcrypt
+jinja2
+httpx

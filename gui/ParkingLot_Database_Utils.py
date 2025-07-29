@@ -2,7 +2,7 @@ import psycopg
 import os
 from User_Authentication import load_env
 from psycopg_pool import ConnectionPool
-from datetime import datetime, timezone # Import datetime and timezone
+from datetime import datetime, timezone, date, timedelta # Import datetime and timezone
 import time
 
 # Global connection pool
@@ -275,6 +275,86 @@ def update_stall_status(lot_id, db_stall_id, status):
         if conn:
             pool.putconn(conn)
 
+def get_stall_total_duration_on_this_day(db_stall_id, target_date): 
+    if not isinstance(db_stall_id, int):
+        print(f"Stall_id must be an integer")
+        return -1
+    if not isinstance(target_date, date):
+        print("The second argument must be a date object")
+        return -1
+
+    
+    global pool
+    pool = get_connection_pool()
+    if pool is None:
+        print("Error: Database connection pool not initialized.")
+        return 1
+    conn = None
+    cur = None
+
+    start_of_day = datetime.combine(target_date, datetime.min.time())
+    end_of_day = start_of_day + timedelta(days=1)
+    try:
+        conn = pool.getconn()            
+        cur = conn.cursor()
+        cur.execute("""SELECT
+                    COALESCE(SUM(EXTRACT(EPOCH FROM (exit_timestamp - entry_timestamp))) / 3600.0, 0)
+                    FROM public.parkingsessions
+                    WHERE stall_id = %s 
+                    AND exit_timestamp IS NOT NULL
+                    AND entry_timestamp >= %s 
+                    AND entry_timestamp < %s;
+                    """, (db_stall_id, start_of_day, end_of_day))
+        conn.commit()
+        result = cur.fetchone()
+        return result[0] if result else 0
+        
+
+    except Exception as e:
+        print(f"SQL command execution error: {e}")
+        return -1
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            pool.putconn(conn)
+    
+
+
+
+
+    
+    
+
+def get_stall_average_duration_previous_days(db_stall_id, starting_date, last_date):
+    if not isinstance(db_stall_id, int):
+        print("Stall ID must be an integer")
+        return -1 
+    if not isinstance(starting_date, date):
+        print("The starting day must be an date object")
+        return -1
+    if not isinstance(last_date, date):
+        print("The ending day must be a date object")
+        return -1
+    if last_date<starting_date:
+        print("The last date must be equal or greater than the starting date")
+        return -1
+    
+    current_date = starting_date
+    hours_total = 0
+    day_counter = 0
+    while current_date<=last_date:
+
+        _hours = get_stall_total_duration_on_this_day(db_stall_id, current_date)
+        hours_total += _hours
+        day_counter += 1
+        current_date += timedelta(days=1)
+
+    return hours_total/day_counter
+
+
+
 
     
 
@@ -305,6 +385,9 @@ if __name__=='__main__':
     # result=update_stall_status(1,1,"Occupied")
     # if result ==0:
     #     print("Status updated")
+
+    # print(get_stall_total_duration_on_this_day(1, date(2025,7,28)))
+    print(get_stall_average_duration_previous_days(1, date(2025,7,24), date(2025,7,28)))
 
 
 

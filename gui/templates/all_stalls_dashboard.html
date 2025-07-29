@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>All Stalls Dashboard</title>
+    <script src="./chart.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .dashboard-container {
+            max-width: 900px;
+            margin: auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background-color: #4a5568;
+            color: white;
+            padding: 15px 20px;
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+        .main-display {
+            padding: 20px;
+        }
+        #allStallsChart:hover {
+            cursor: pointer;
+        }
+        .chart-container {
+            position: relative;
+        }
+        .chart-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<div class="dashboard-container">
+    <div class="header">🅿️ Parking Dashboard</div>
+    
+    <div class="main-display">
+        <div class="chart-title">Parking Duration for Lot #{{lot_id}} (Today)</div>
+        <div class="chart-container">
+            <canvas id="allStallsChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+    const chartCanvas = document.getElementById('allStallsChart').getContext('2d');
+    let allStallsChart;    
+    function renderAllStallsChart(data, labels) {
+        if (allStallsChart) {
+            allStallsChart.destroy();
+        }
+        allStallsChart = new Chart(chartCanvas, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Total Occupied Hours',
+                    data: data,
+                    backgroundColor: '#4299e1',
+                    borderColor: '#2c5282',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                scales: {
+                    x: {
+                        beginAtZero: true,
+                        title: { display: true, text: 'Total Duration (Hours)' }
+                    },
+                    y: {
+                        title: { display: true, text: 'Stall ID' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false }
+                },
+                responsive: true,
+                maintainAspectRatio: false,
+                onClick: (e) => {
+                    const activePoints = allStallsChart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, true);
+                    
+                    if (activePoints.length > 0) {
+                        // --- REVERTED LINE ---
+                        // The destination is now a static page, regardless of which bar is clicked.
+                        const targetUrl = 'dashboard2.html';
+                        
+                        console.log(`Redirecting to: ${targetUrl}`);
+                        window.location.href = targetUrl;
+                    }
+                }
+            }
+        });
+    }
+
+    const chartData = {{ chart_data | tojson }};
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelector('.chart-container').style.height = '400px'; 
+        if (chartData.labels && chartData.data) {
+            renderAllStallsChart(chartData.data, chartData.labels);
+        } else {
+            document.querySelector('.chart-title').textContent = 'No data available for this lot.';
+        }
+    });
+</script>
+
+</body>
+</html>
