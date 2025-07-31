@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>All Stalls Dashboard</title>
-    <script src="./chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -60,18 +60,19 @@
 
 <script>
     const chartCanvas = document.getElementById('allStallsChart').getContext('2d');
-    let allStallsChart;    
-    function renderAllStallsChart(data, labels) {
+    let allStallsChart;
+    let allStallsData = []; // 1. Variable to store the full data    
+    function renderAllStallsChart(chartLabels, chartValues) {
         if (allStallsChart) {
             allStallsChart.destroy();
         }
         allStallsChart = new Chart(chartCanvas, {
             type: 'bar',
             data: {
-                labels: labels,
+                labels: chartLabels,
                 datasets: [{
                     label: 'Total Occupied Hours',
-                    data: data,
+                    data: chartValues,
                     backgroundColor: '#4299e1',
                     borderColor: '#2c5282',
                     borderWidth: 1
@@ -95,26 +96,53 @@
                 maintainAspectRatio: false,
                 onClick: (e) => {
                     const activePoints = allStallsChart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, true);
-                    
                     if (activePoints.length > 0) {
-                        // --- REVERTED LINE ---
-                        // The destination is now a static page, regardless of which bar is clicked.
-                        const targetUrl = 'dashboard2.html';
+                        const clickedIndex = activePoints[0].index;
                         
-                        console.log(`Redirecting to: ${targetUrl}`);
-                        window.location.href = targetUrl;
+                        // Look up the correct stall object from our globally stored data
+                        const clickedStall = allStallsData[clickedIndex];
+                        if (clickedStall) {
+                            const stallId = clickedStall.id; // Get the unique ID
+                            const targetUrl = `/dashboard/stall/${stallId}`;
+                            
+                            console.log(`Redirecting to: ${targetUrl}`);
+                            window.location.href = targetUrl;
+                        }
                     }
                 }
             }
         });
     }
 
-    const chartData = {{ chart_data | tojson }};
+    // Data is injected by the server here, assuming your API returns a list of objects
+    const serverData = {{ chart_data | tojson }};
 
     document.addEventListener('DOMContentLoaded', () => {
-        document.querySelector('.chart-container').style.height = '400px'; 
-        if (chartData.labels && chartData.data) {
-            renderAllStallsChart(chartData.data, chartData.labels);
+                
+        // Check if the data from the server is a valid array with content
+        if (Array.isArray(serverData) && serverData.length > 0) {
+            allStallsData = serverData; // Store the full data
+
+            // --- DYNAMIC HEIGHT CALCULATION ---
+            // 1. Get the number of stalls from the data
+            const numberOfStalls = allStallsData.length;
+
+            // 2. Calculate a height (e.g., 30px per bar) plus some padding
+            const dynamicHeight = (numberOfStalls * 30) + 50;
+            
+            // 3. Set a minimum height to prevent it from being too small
+            const finalHeight = Math.max(250, dynamicHeight);
+
+            // 4. Apply the calculated height to the chart's container
+            document.querySelector('.chart-container').style.height = `${finalHeight}px`;
+            // --- END OF CALCULATION ---
+            
+            // Prepare the simple arrays that Chart.js needs using .map()
+            const labels = allStallsData.map(stall => stall.number);
+            const durations = allStallsData.map(stall => stall.duration);
+            
+            // Render the chart with the prepared data
+            renderAllStallsChart(labels, durations);
         } else {
             document.querySelector('.chart-title').textContent = 'No data available for this lot.';
         }

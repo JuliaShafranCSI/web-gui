@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Form, Request, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
 from fastapi.templating import Jinja2Templates
 import os, redis, random, time, re, threading, cv2, numpy as np, struct, asyncio, base64
@@ -7,7 +8,8 @@ from User_Authentication import load_env, authenticate_user_sql
 from typing import Optional
 from urllib.parse import quote_plus
 from ParkingLot_Database_Utils import pool, get_connection_pool
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+import zoneinfo
 import httpx
 
 # ----- Configuration ----------------------------
@@ -21,6 +23,7 @@ MAX_WAIT_SEC= 30
 load_env("./.env")
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET_KEY", "super-secret"))
 
@@ -87,31 +90,43 @@ async def frames(request: Request):
 api_cache = {}
 CACHE_DURATION_SECONDS = 3600
 @app.get('/api/get-stall-numbers')
-async def get_all_stall_numbers(lot_id=1):
+# Use FastAPI's type hints for automatic validation
+async def get_all_stall_numbers(lot_id: int = 1):
     current_time = time.time()
+    
+    
     if lot_id in api_cache:
         cache_entry = api_cache[lot_id]
         is_cache_valid = (current_time - cache_entry["last_fetched"]) < CACHE_DURATION_SECONDS
-    if is_cache_valid:
-        print(f"Serving stall IDs for lot {lot_id} from cache.")
-        return cache_entry["stall_ids"]
+        if "stall_ids" in cache_entry and is_cache_valid:
+            print(f"Serving stall IDs for lot {lot_id} from cache.")
+            return cache_entry["stall_ids"]
+
     try:
-        conn  = pool.getconn()
+        conn = pool.getconn()
+        conn.autocommit = True
         cur = conn.cursor()
-        cur.execute(""" SELECT stall_id, stall_number from public.stalls 
-                    WHERE lot_id = %s 
-                    ORDER BY CAST(stall_number AS INTEGER);""", (lot_id))
+        cur.execute("""
+            SELECT stall_id, stall_number from public.stalls 
+            WHERE lot_id = %s 
+            ORDER BY CAST(stall_number AS INTEGER);
+            """, (lot_id,))
         rows = cur.fetchall()
-        conn.commit()
-        stalls = [{"stall_id": row[0], "stall_number": row[1]} for row in rows]
+        
+        
+        stalls = [{"id": row[0], "number": row[1]} for row in rows]
     
-        api_cache[lot_id]={
+        api_cache[lot_id] = {
             "stall_ids": stalls,
-            "last_fetched":current_time
+            "last_fetched": current_time
         }
         return stalls
+        
     except Exception as e:
         print(f"SQL command execution error: {e}")
+        # --- FIX 3: Raise a proper HTTP Exception on error ---
+        raise HTTPException(status_code=500, detail="Database query failed")
+        
     finally:
         if cur:
             cur.close()
@@ -124,12 +139,26 @@ async def get_stall_durations(lot_id: int):
     conn = None
     cur = None
     
-    today = date.today()
-    start_of_day = datetime.combine(today, datetime.min.time())
-    end_of_day = start_of_day + timedelta(days=1)
+    #UTC time: today
+    # utc_now = datetime.now(timezone.utc)
+    # start_of_day = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    #local time zone: today
+    local_tz = zoneinfo.ZoneInfo("America/Edmonton")
+    local_now = datetime.now(local_tz)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
+    end_of_day_utc = start_of_day_utc + timedelta(days=1)
+    
+
+    # test_date = date(2025, 7, 30) # For example, yesterday
+    # start_of_day = datetime.combine(test_date, datetime.min.time())
+    
+    # end_of_day = start_of_day + timedelta(days=1)
     
     sql = """
         SELECT 
+            s.stall_id,
             s.stall_number,
             COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0) as total_duration
         FROM public.stalls s
@@ -145,14 +174,14 @@ async def get_stall_durations(lot_id: int):
     try:
         conn = pool.getconn()
         cur = conn.cursor()
-        cur.execute(sql, (start_of_day, end_of_day, lot_id))
+        cur.execute(sql, (start_of_day_utc, end_of_day_utc, lot_id))
         rows = cur.fetchall()
 
-        chart_data = {
-            "labels": [row[0] for row in rows],
-            "data": [round(float(row[1]), 2) for row in rows]
-        }
-        return chart_data
+        stalls_data = [
+            {"id": row[0], "number": row[1], "duration": round(float(row[2]), 2)}
+            for row in rows
+        ]
+        return stalls_data
     except Exception as e:
         print(f"Database error: {e}")
         raise HTTPException(status_code=500, detail="Could not retrieve data")
@@ -192,10 +221,95 @@ async def get_dashboard(request: Request, lot_id: int):
 
 
 
+@app.get("/dashboard/stall/{stall_id}", response_class=HTMLResponse)
+async def get_single_stall_dashboard(request: Request, stall_id: int):
+    """Renders a detail page for a single stall using its unique ID."""
+    
+    # You can now use the stall_id to fetch specific data from the database
+    stall_data = {
+        "id": stall_id,        
+    }
+
+    return templates.TemplateResponse("single_stall_dashboard.html", {
+        "request": request,
+        "stall_data": stall_data
+    })
+
+@app.get("/api/stall-history")
+async def get_stall_history(stall_id: int, days: int = 7):
+    """Gets the parking duration history for a single stall over a number of days."""
+    conn = None
+    cur = None
+
+    # 1. Define the overall date range for the query
+    # today = date.today()
+    # start_date = today - timedelta(days=days - 1)
+    # end_date = today + timedelta(days=1)
 
 
+    
+    # start_of_range = datetime.combine(start_date, datetime.min.time())
+    # end_of_range = datetime.combine(end_date, datetime.min.time())
 
+    local_tz = zoneinfo.ZoneInfo("America/Edmonton")
+    local_now = datetime.now(local_tz)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)-timedelta(days=days-1)
+    
+    start_of_range = start_of_day_local.astimezone(timezone.utc)
+    end_of_range = local_now
+    
+    # 2. A single SQL query to get daily totals for the entire range
+    sql = """
+        SELECT
+            DATE(ps.entry_timestamp),
+            COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
+        FROM public.parkingsessions ps
+        WHERE
+            ps.stall_id = %s
+            AND ps.entry_timestamp >= %s
+            AND ps.entry_timestamp < %s
+        GROUP BY DATE(ps.entry_timestamp)
+        ORDER BY DATE(ps.entry_timestamp);
+    """
+    
+    try:
+        conn = pool.getconn()
+        cur = conn.cursor()
+        cur.execute(sql, (stall_id, start_of_range, end_of_range))
+        rows = cur.fetchall()
 
+        # 3. Process the results, filling in days with no data
+        results_by_date = {row[0]: row[1] for row in rows}
+        labels = []
+        data = []
+        
+        for i in range(days):
+            target_date = start_of_range.date() + timedelta(days=i)
+            duration = results_by_date.get(target_date, 0) # Get duration or default to 0
+            labels.append(target_date.strftime("%b %d"))
+            data.append(round(duration, 2))
+        
+        # Calculate KPIs from the already-fetched data
+        total_duration = sum(data)
+        avg_duration = total_duration / days if days > 0 else 0
+        busiest_day_val = max(data) if data else 0
+        busiest_day_index = data.index(busiest_day_val) if busiest_day_val > 0 else -1
+        busiest_day_label = (start_of_range.date() + timedelta(days=busiest_day_index)).strftime("%B %d, %Y") if busiest_day_index != -1 else "N/A"
+
+        return {
+            "labels": labels, "data": data,
+            "kpi": {
+                "total": f"{round(total_duration, 1)} hrs",
+                "avg": f"{round(avg_duration, 1)} hrs",
+                "busiest": busiest_day_label
+            }
+        }
+    except Exception as e:
+        print(f"Database error: {e}")
+        raise HTTPException(status_code=500, detail="Could not retrieve data")
+    finally:
+        if cur: cur.close()
+        if conn: pool.putconn(conn)
 
 # ---- HTML snippets ----
 LOGIN_HTML = """<!DOCTYPE html><html><head>
