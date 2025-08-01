@@ -105,7 +105,7 @@
 
             // Update Titles
             const selectedStallText = stallSelector.options[stallSelector.selectedIndex].text;
-            document.getElementById('stall-header').textContent = `${selectedStallText}`;
+            document.getElementById('stall-header').textContent = `Stall ${selectedStallText}`;
             document.getElementById('chart-title').textContent = `Daily Occupancy for ${selectedStallText} (Past ${currentTimeframe} Days)`;
             
             // Render Chart

@@ -133,6 +133,45 @@ async def get_all_stall_numbers(lot_id: int = 1):
         if conn:
             pool.putconn(conn)
 
+@app.get("/api/availability/today")
+async def get_availability_today(lot_id: int):
+    """API endpoint to get the number of available spots throughout today."""
+    conn = None
+    cur = None
+    local_tz = zoneinfo.ZoneInfo("America/Edmonton")
+    local_now = datetime.now(local_tz)
+    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
+    end_of_day_utc = start_of_day_utc + timedelta(days=1)
+
+    sql = """SELECT available_stalls, total_stalls, timestamp from public.availabilitysnapshots
+    WHERE lot_id = %s 
+    AND timestamp >= %s
+    AND timestamp < %s
+    ORDER BY timestamp ASC
+    """
+
+    try:
+        conn = pool.getconn()
+        cur = conn.cursor()
+        cur.execute(sql, (lot_id, start_of_day_utc, end_of_day_utc))
+        rows = cur.fetchall()
+        chart_data = {
+            "labels": [row[2].strftime("%I:%M %p") for row in rows], # e.g., "02:03 PM"
+            "data": [len(row[0]) for row in rows]
+        }
+        return chart_data
+    except Exception as e:
+        print(f"SQL command execution error: {e}")
+        return JSONResponse({"error": "Database query failed"}, status_code=500)
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            pool.putconn(conn)
+
+    
+
 @app.get("/api/stall_durations")
 async def get_stall_durations(lot_id: int):
     """API endpoint to get total parking duration for all stalls in a specific lot."""
@@ -203,12 +242,12 @@ async def get_dashboard(request: Request, lot_id: int):
         async with httpx.AsyncClient() as client:
             response = await client.get(api_url)
             response.raise_for_status() # Raise an exception for bad responses (4xx or 5xx)
-            chart_data = response.json()
+            duration_data = response.json()
 
         # 4. Pass the fetched data to the Jinja2 template
         return templates.TemplateResponse("all_stalls_dashboard.html", {
             "request": request,
-            "chart_data": chart_data,
+            "duration_data": duration_data,
             "lot_id": lot_id
         })
 

@@ -50,9 +50,15 @@
 <div class="dashboard-container">
     <div class="header">🅿️ Parking Dashboard</div>
     
-    <div class="main-display">
-        <div class="chart-title">Parking Duration for Lot #{{lot_id}} (Today)</div>
+    <div class="main-display">       
+        
+        <div class="chart-title">Available Spots for Lot #{{lot_id}} (Today)</div>
         <div class="chart-container">
+            <canvas id="availabilityChart"></canvas>
+        </div>
+        <hr style="margin: 40px 0;">
+        <div class="chart-title">Parking Duration for Lot #{{lot_id}} (Today)</div>
+        <div class="chart-container" id="durationChartContainer">
             <canvas id="allStallsChart"></canvas>
         </div>
     </div>
@@ -60,7 +66,9 @@
 
 <script>
     const chartCanvas = document.getElementById('allStallsChart').getContext('2d');
+    const availabilityCanvas = document.getElementById('availabilityChart').getContext('2d');
     let allStallsChart;
+    let availabilityChart;
     let allStallsData = []; // 1. Variable to store the full data    
     function renderAllStallsChart(chartLabels, chartValues) {
         if (allStallsChart) {
@@ -113,11 +121,61 @@
             }
         });
     }
-
+    function renderAvailabilityChart(data, labels) {
+        if (availabilityChart) {
+            availabilityChart.destroy();
+        }
+        availabilityChart = new Chart(availabilityCanvas, {
+            type: 'line', // This chart will be a line chart
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Available Spots',
+                    data: data,
+                    borderColor: '#48bb78',
+                    tension: 0.1,
+                    fill: false
+                }]
+            },
+            options: { plugins: { legend: { display: false } }, 
+                        scales: {
+                            x: { // Configuration for the X-axis
+                                title: {
+                                    display: true,      // Show the label
+                                    text: 'Timestamp' // The text for the label
+                                }
+                            },
+                            y: { // Optional: You can also add a Y-axis label
+                                title: {
+                                    display: true,
+                                    text: 'Available Spots'
+                                },
+                                ticks: {
+                                // This forces the tick values to be integers
+                                precision: 0
+                                }
+                            }
+                        }
+        
+        }
+        });
+    }
     // Data is injected by the server here, assuming your API returns a list of objects
-    const serverData = {{ chart_data | tojson }};
+    const serverData = {{ duration_data | tojson }};
 
     document.addEventListener('DOMContentLoaded', () => {
+        // --- PART 2: Fetch Data for the Second Chart ---
+        fetch(`/api/availability/today?lot_id={{lot_id}}`)
+            .then(response => response.json())
+            .then(availabilityData => {
+                if (availabilityData.labels && availabilityData.data) {
+                    renderAvailabilityChart(availabilityData.data, availabilityData.labels);
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching availability data:', error);
+                document.querySelector('#availabilityChart').parentElement.previousElementSibling.textContent = 'Error: Could not load availability data.';
+            });
                 
         // Check if the data from the server is a valid array with content
         if (Array.isArray(serverData) && serverData.length > 0) {
@@ -128,13 +186,13 @@
             const numberOfStalls = allStallsData.length;
 
             // 2. Calculate a height (e.g., 30px per bar) plus some padding
-            const dynamicHeight = (numberOfStalls * 30) + 50;
+            const dynamicHeight = (numberOfStalls * 10) + 50;
             
             // 3. Set a minimum height to prevent it from being too small
             const finalHeight = Math.max(250, dynamicHeight);
 
             // 4. Apply the calculated height to the chart's container
-            document.querySelector('.chart-container').style.height = `${finalHeight}px`;
+            document.getElementById('durationChartContainer').style.height = `${finalHeight}px`;
             // --- END OF CALCULATION ---
             
             // Prepare the simple arrays that Chart.js needs using .map()
@@ -146,6 +204,7 @@
         } else {
             document.querySelector('.chart-title').textContent = 'No data available for this lot.';
         }
+        
     });
 </script>
 
