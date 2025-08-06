@@ -11,6 +11,8 @@ from ParkingLot_Database_Utils import pool, get_connection_pool
 from datetime import datetime, date, timedelta, timezone
 import zoneinfo
 import httpx
+import csv, io
+from fastapi.responses import StreamingResponse
 
 # ----- Configuration ----------------------------
 PID         = 12345678                                  # demo PID for stream
@@ -229,6 +231,64 @@ async def get_stall_durations(lot_id: int):
             cur.close()
         if conn: 
             pool.putconn(conn)
+
+
+@app.get("/api/stall_durations_csv")
+async def get_stall_durations_csv(lot_id: int):
+    stalls_data = await get_stall_durations(lot_id)
+
+    def csv_rows():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["stall_number", "total_duration_h"])
+        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+        for s in stalls_data:
+            writer.writerow([s["number"], s["duration"]])
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="stall_durations_{lot_id}.csv"'
+    }
+    return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
+
+
+
+@app.get("/api/stall_history_csv")
+async def get_stall_history_csv(stall_id: int, days: int = 7):
+    if days not in (7, 30):
+        raise HTTPException(400, "days must be 7 or 30")
+
+    conn, cur = None, None
+    try:
+        conn = pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT stall_number FROM public.stalls WHERE stall_id = %s", (stall_id,))
+        row = cur.fetchone()
+        stall_number = row[0] if row else stall_id
+    finally:
+        if cur: cur.close()
+        if conn: pool.putconn(conn)
+
+    hist = await get_stall_history(stall_id, days)
+
+    def csv_rows():
+        buf = io.StringIO(); csvw = csv.writer(buf)
+        csvw.writerow(["date", "occupied_hours"]); yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for lbl, hrs in zip(hist["labels"], hist["data"]):
+            csvw.writerow([lbl, hrs]); yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    headers = {
+        "Content-Disposition":
+        f'attachment; filename="stall_{stall_number}_{days}d.csv"'
+    }
+    return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
+
+
+
+
 
 @app.get("/dashboard/lot/{lot_id}", response_class=HTMLResponse)
 async def get_dashboard(request: Request, lot_id: int):

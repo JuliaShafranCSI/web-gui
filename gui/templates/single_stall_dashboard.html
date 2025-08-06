@@ -24,6 +24,26 @@
         .kpi-card .value { font-size: 2em; font-weight: bold; color: #2d3748; }
         .chart-container { position: relative; }
         .chart-title { font-weight: bold; margin-bottom: 10px; }
+
+        .controls{
+            display:flex;               /* lay children out in one row            */
+            align-items:center;         /* vertically center everything           */
+            gap:12px;                   /* little breathing room between pieces   */
+        }
+
+        /* push the export button to the far right */
+        .export-btn{
+            margin:0;                   /* kill the old top-margin                */
+            margin-left:auto;           /* auto left-margin === take all spare    */
+            padding:10px 18px;
+            font-weight:600;
+            text-decoration:none;
+            color:#fff;
+            background:#3182ce;
+            border-radius:6px;
+            transition:background-color .15s ease;
+        }
+        .export-btn:hover{ background:#225ea8; }
     </style>
 </head>
 <body>
@@ -40,6 +60,12 @@
             <button id="btn-7days" class="active">7 Days</button>
             <button id="btn-30days">30 Days</button>
         </div>
+
+        <a id="export-csv-btn"
+            data-stall-id="{{ stall_data.id }}"
+            href="#"
+            download
+            class="export-btn">⬇ Export</a>
     </div>
 
     <div class="main-display">
@@ -64,6 +90,7 @@
     const stallSelector = document.getElementById('stall-selector');
     const timeframeSelector = document.querySelector('.timeframe-selector');
     const chartCanvas = document.getElementById('occupancyChart').getContext('2d');
+    const exportBtn = document.getElementById('export-csv-btn');
 
     // --- State Variables ---
     let occupancyChart;
@@ -150,6 +177,10 @@
         }
     }
 
+    function buildExportUrl () {
+        return `/api/stall_history_csv?stall_id=${currentStallId}&days=${currentTimeframe}`;
+    }
+
     // --- Event Listeners ---
     stallSelector.addEventListener('change', (e) => {
         currentStallId = e.target.value;
@@ -173,6 +204,10 @@
         e.target.classList.add('active');
 
         updateDashboard();
+    });
+
+    exportBtn.addEventListener('pointerdown', () => {
+        exportBtn.href = buildExportUrl();
     });
     
     // --- Initial Load ---
