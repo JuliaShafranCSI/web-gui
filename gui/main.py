@@ -5,7 +5,7 @@ from fastapi.templating import Jinja2Templates
 import os, redis, random, time, re, threading, cv2, numpy as np, struct, asyncio, base64
 from starlette.middleware.sessions import SessionMiddleware
 from User_Authentication import load_env, authenticate_user_sql
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import quote_plus
 from ParkingLot_Database_Utils import pool, get_connection_pool
 from datetime import datetime, date, timedelta, timezone
@@ -269,9 +269,9 @@ async def get_stall_durations_csv(lot_id: int):
 
 
 @app.get("/api/stall_history_csv")
-async def get_stall_history_csv(stall_id: int, days: int = 7):
-    if days not in (7, 30):
-        raise HTTPException(400, "days must be 7 or 30")
+async def get_stall_history_csv(stall_id: int, days: str = "7"):
+    if days not in ("7", "30", "365", "all"):
+        raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
 
     conn, cur = None, None
     try:
@@ -294,10 +294,12 @@ async def get_stall_history_csv(stall_id: int, days: int = 7):
             csvw.writerow([lbl, hrs]); yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
 
+    suffix = days if days != "all" else "all"
     headers = {
         "Content-Disposition":
-        f'attachment; filename="stall_{stall_number}_{days}d.csv"'
+        f'attachment; filename="stall_{stall_number}_{suffix}.csv"'
     }
+    
     return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
 
 
@@ -347,10 +349,20 @@ async def get_single_stall_dashboard(request: Request, stall_id: int):
     })
 
 @app.get("/api/stall-history")
-async def get_stall_history(stall_id: int, days: int = 7):
+async def get_stall_history(stall_id: int, days: str = "7"):
     """Gets the parking duration history for a single stall over a number of days."""
     conn = None
     cur = None
+
+    if days == "all":
+        days_int = None                       # sentinel → unlimited
+    else:
+        try:
+            days_int = int(days)              # "7" → 7
+        except ValueError:
+            raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
+        if days_int not in (7, 30, 365):
+            raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
 
     # 1. Define the overall date range for the query
     # today = date.today()
@@ -364,48 +376,71 @@ async def get_stall_history(stall_id: int, days: int = 7):
 
     local_tz = zoneinfo.ZoneInfo("America/Edmonton")
     local_now = datetime.now(local_tz)
-    start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)-timedelta(days=days-1)
     
-    start_of_range = start_of_day_local.astimezone(timezone.utc)
+    if days_int is None:                      # all-time → no lower bound
+        start_of_range = None                 # handled in SQL below
+    else:
+        start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_int - 1)
+        start_of_range = start_of_day_local.astimezone(timezone.utc)
+
     end_of_range = local_now
     
-    # 2. A single SQL query to get daily totals for the entire range
-    sql = """
-        SELECT
-            DATE(ps.entry_timestamp),
-            COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
-        FROM public.parkingsessions ps
-        WHERE
-            ps.stall_id = %s
+    if days_int is None:
+        sql = """
+            SELECT DATE(ps.entry_timestamp),
+                   COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
+            FROM public.parkingsessions ps
+            WHERE ps.stall_id = %s
+            AND ps.entry_timestamp < %s
+            GROUP BY DATE(ps.entry_timestamp)
+            ORDER BY DATE(ps.entry_timestamp);
+        """
+        params = (stall_id, end_of_range)
+    else:
+        sql = """
+            SELECT DATE(ps.entry_timestamp),
+                   COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
+            FROM public.parkingsessions ps
+            WHERE ps.stall_id = %s
             AND ps.entry_timestamp >= %s
             AND ps.entry_timestamp < %s
-        GROUP BY DATE(ps.entry_timestamp)
-        ORDER BY DATE(ps.entry_timestamp);
-    """
+            GROUP BY DATE(ps.entry_timestamp)
+            ORDER BY DATE(ps.entry_timestamp);
+        """
+        params = (stall_id, start_of_range, end_of_range)
     
     try:
         conn = pool.getconn()
         cur = conn.cursor()
-        cur.execute(sql, (stall_id, start_of_range, end_of_range))
+        cur.execute(sql, params)
         rows = cur.fetchall()
 
         # 3. Process the results, filling in days with no data
         results_by_date = {row[0]: row[1] for row in rows}
-        labels = []
-        data = []
-        
-        for i in range(days):
-            target_date = start_of_range.date() + timedelta(days=i)
-            duration = results_by_date.get(target_date, 0) # Get duration or default to 0
-            labels.append(target_date.strftime("%b %d"))
-            data.append(round(duration, 2))
+        labels, data = [], []
+
+        if days_int is None:                      # all-time → iterate over real dates
+            for dt, hours in sorted(results_by_date.items()):
+                labels.append(dt.strftime("%b %d"))
+                data.append(round(hours, 2))
+        else:                                     # existing fill-in-blanks logic
+            for i in range(days_int):
+                target_date = start_of_range.date() + timedelta(days=i)
+                duration = results_by_date.get(target_date, 0)
+                labels.append(target_date.strftime("%b %d"))
+                data.append(round(duration, 2))
         
         # Calculate KPIs from the already-fetched data
+        period_len = (days_int if days_int is not None else len(data)) or 1
+
         total_duration = sum(data)
-        avg_duration = total_duration / days if days > 0 else 0
-        busiest_day_val = max(data) if data else 0
-        busiest_day_index = data.index(busiest_day_val) if busiest_day_val > 0 else -1
-        busiest_day_label = (start_of_range.date() + timedelta(days=busiest_day_index)).strftime("%B %d, %Y") if busiest_day_index != -1 else "N/A"
+        avg_duration   = total_duration / period_len
+
+        busiest_day_val    = max(data) if data else 0
+        busiest_day_index  = data.index(busiest_day_val) if busiest_day_val > 0 else -1
+        busiest_day_label  = (
+            labels[busiest_day_index] if busiest_day_index != -1 else "N/A"
+        )
 
         return {
             "labels": labels, "data": data,
