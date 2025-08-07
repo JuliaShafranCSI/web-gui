@@ -68,11 +68,25 @@ def logout(request: Request):
     request.session.pop("authenticated", None)
     return RedirectResponse(url="/login", status_code=303)
 
+# @app.get('/stream', response_class=HTMLResponse)
+# def stream(request: Request):
+#     if not request.session.get("authenticated"):
+#         return RedirectResponse(url="/login", status_code=303)
+#     return HTMLResponse(STREAM_HTML)
+
 @app.get('/stream', response_class=HTMLResponse)
 def stream(request: Request):
     if not request.session.get("authenticated"):
         return RedirectResponse(url="/login", status_code=303)
-    return HTMLResponse(STREAM_HTML)
+    # old: return HTMLResponse(STREAM_HTML)
+    return templates.TemplateResponse("stream.html", {"request": request})
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/login", status_code=303)
+    # old: return STREAM_HTML
+    return templates.TemplateResponse("stream.html", {"request": request})
 
 @app.get('/frames')
 async def frames(request: Request):
@@ -285,8 +299,6 @@ async def get_stall_history_csv(stall_id: int, days: int = 7):
         f'attachment; filename="stall_{stall_number}_{days}d.csv"'
     }
     return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
-
-
 
 
 

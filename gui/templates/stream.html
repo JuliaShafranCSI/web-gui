@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live Stream</title>
+
+  <style>
+    body{background:#f8f9fa; margin:0; padding-top:64px;} /* keep below fixed bar */
+    h4{margin:2.5rem 0 1.5rem;}
+    .wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
+    img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
+  </style>
+</head>
+<body>
+
+  {% extends 'base.html' %}
+
+  <h4 class="text-center">Live Stream</h4>
+
+  <div class="wrap">
+    <img id="raw" class="frame">
+    <img id="res" class="frame">
+  </div>
+
+  <script>
+    const raw=document.getElementById('raw'),
+          res=document.getElementById('res');
+    async function poll(){
+      try{
+        const r = await fetch('/frames',{cache:'no-store'});
+        if(r.ok){
+          const j = await r.json();
+          raw.src = j.raw;  res.src = j.res;
+          raw.style.visibility = res.style.visibility = 'visible';
+        }
+      }catch(_){}
+      setTimeout(poll,200);
+    }
+    poll();
+  </script>
+</body>
+</html>
