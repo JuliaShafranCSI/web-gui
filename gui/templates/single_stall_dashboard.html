@@ -35,10 +35,16 @@
             gap:12px;                   /* little breathing room between pieces   */
         }
 
-        /* push the export button to the far right */
+        /* push the whole group to the far right */
+        .export-group{
+            margin-left:auto;          /* consumes all leftover space */
+            display:flex;
+            align-items:center;
+            gap:8px;                   /* space between buttons */
+        }
+
         .export-btn{
             margin:0;                   /* kill the old top-margin                */
-            margin-left:auto;           /* auto left-margin === take all spare    */
             padding:10px 18px;
             font-weight:600;
             text-decoration:none;
@@ -69,11 +75,10 @@
             <button id="btn-all">All Time</button>
         </div>
 
-        <a id="export-csv-btn"
-            data-stall-id="{{ stall_data.id }}"
-            href="#"
-            download
-            class="export-btn">⬇ Export</a>
+        <div class="export-group">
+            <a id="export-csv-btn" href="#" download class="export-btn">⬇ Export</a>
+            <a id="export-all-zip-btn" href="#" download class="export-btn">⬇ Export ALL (ZIP)</a>
+        </div>
     </div>
 
     <div class="main-display">
@@ -99,6 +104,7 @@
     const timeframeSelector = document.querySelector('.timeframe-selector');
     const chartCanvas = document.getElementById('occupancyChart').getContext('2d');
     const exportBtn = document.getElementById('export-csv-btn');
+    const exportAllZipBtn = document.getElementById('export-all-zip-btn');
 
     const TIMEFRAMES = {
     'btn-7days'    : 7,      // 1 week
@@ -209,7 +215,14 @@
         const daysParam = (typeof currentTimeframe === 'number')
                             ? currentTimeframe          // 7, 30, 365
                             : 'all';                    // null → "all"
-        return `/api/stall_history_csv?stall_id=${currentStallId}&days=${daysParam}`;
+        const lotId = 1; // hardcoded for now
+        return `/api/stall_history_csv?lot_id=${lotId}&stall_id=${currentStallId}&days=${daysParam}`;
+    }
+
+    function buildBulkExportZipUrl () {
+        const daysParam = (typeof currentTimeframe === 'number') ? currentTimeframe : 'all';
+        const lotId = 1; // hardcoded for now
+        return `/api/stall_histories_zip?lot_id=${lotId}&days=${daysParam}`;
     }
 
     // --- Event Listeners ---
@@ -240,6 +253,12 @@
     exportBtn.addEventListener('pointerdown', () => {
         exportBtn.href = buildExportUrl();
     });
+
+    if (exportAllZipBtn) {
+        exportAllZipBtn.addEventListener('pointerdown', () => {
+        exportAllZipBtn.href = buildBulkExportZipUrl();
+        });
+    }
     
     // --- Initial Load ---
     document.addEventListener('DOMContentLoaded', () => {

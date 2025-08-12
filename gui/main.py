@@ -13,6 +13,7 @@ import zoneinfo
 import httpx
 import csv, io
 from fastapi.responses import StreamingResponse
+from zipfile import ZipFile, ZIP_DEFLATED
 
 # ----- Configuration ----------------------------
 PID         = 12345678                                  # demo PID for stream
@@ -38,8 +39,25 @@ pending: dict[float, tuple[np.ndarray, float]] = {}
 
 templates = Jinja2Templates(directory = "templates")
 
-
 pool = get_connection_pool()
+
+
+def export_suffix(days: str) -> str:
+    """Map query 'days' to a readable filename suffix."""
+    if days == "all":
+        return "all_time"
+    if days == "365":
+        return "12months"
+    if days == "30":
+        return "30days"
+    if days == "7":
+        return "7days"
+    try:
+        n = int(days)
+        return f"{n}days"
+    except:
+        return days.replace("-", "_")
+
 
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request, error: Optional[str] = None):
@@ -173,7 +191,8 @@ async def get_availability_today(lot_id: int):
         cur.execute(sql, (lot_id, start_of_day_utc, end_of_day_utc))
         rows = cur.fetchall()
         chart_data = {
-            "labels": [row[2].strftime("%I:%M %p") for row in rows], # e.g., "02:03 PM"
+            # convert each row[2] (UTC) to Alberta time first
+            "labels": [row[2].astimezone(local_tz).strftime("%I:%M %p") for row in rows],
             "data": [len(row[0]) for row in rows]
         }
         return chart_data
@@ -247,6 +266,31 @@ async def get_stall_durations(lot_id: int):
             pool.putconn(conn)
 
 
+# === CSV export for today's availability timeline =========================
+@app.get("/api/availability_today_csv")
+async def availability_today_csv(lot_id: int):
+    """
+    Returns a CSV with two columns:
+      timestamp (HH:MM AM/PM, local time) | available_spots
+    """
+    chart = await get_availability_today(lot_id)           # reuse existing query
+
+    def csv_rows():
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["timestamp", "available_spots"]); yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+
+        for ts, spots in zip(chart["labels"], chart["data"]):
+            w.writerow([ts, spots]); yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    today = datetime.now(zoneinfo.ZoneInfo("America/Edmonton")).strftime("%Y-%m-%d")
+    headers = {
+        "Content-Disposition": f'attachment; filename="availability_lot{lot_id}_{today}.csv"'
+    }
+    return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
+
+
 @app.get("/api/stall_durations_csv")
 async def get_stall_durations_csv(lot_id: int):
     stalls_data = await get_stall_durations(lot_id)
@@ -262,14 +306,14 @@ async def get_stall_durations_csv(lot_id: int):
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
 
     headers = {
-        "Content-Disposition": f'attachment; filename="stall_durations_{lot_id}.csv"'
+        "Content-Disposition": f'attachment; filename="stall_durations_lot{lot_id}.csv"'
     }
     return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
 
 
 
 @app.get("/api/stall_history_csv")
-async def get_stall_history_csv(stall_id: int, days: str = "7"):
+async def get_stall_history_csv(lot_id: int, stall_id: int, days: str = "7"):
     if days not in ("7", "30", "365", "all"):
         raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
 
@@ -294,13 +338,57 @@ async def get_stall_history_csv(stall_id: int, days: str = "7"):
             csvw.writerow([lbl, hrs]); yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
 
-    suffix = days if days != "all" else "all"
+    suffix = export_suffix(days)
     headers = {
         "Content-Disposition":
-        f'attachment; filename="stall_{stall_number}_{suffix}.csv"'
+        f'attachment; filename="lot{lot_id}_stall_{stall_number}_{suffix}.csv"'
     }
-    
+
     return StreamingResponse(csv_rows(), media_type="text/csv", headers=headers)
+
+
+@app.get("/api/stall_histories_zip")
+async def stall_histories_zip(lot_id: int, days: str = "7"):
+    if days not in ("7", "30", "365", "all"):
+        raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
+
+    conn = cur = None
+    try:
+        conn = pool.getconn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT stall_id, stall_number
+            FROM public.stalls
+            WHERE lot_id = %s
+            ORDER BY CAST(stall_number AS INTEGER)
+        """, (lot_id,))
+        stalls = cur.fetchall()  # [(stall_id, stall_number), ...]
+
+        suffix = export_suffix(days)
+        mem = io.BytesIO()
+        with ZipFile(mem, "w", ZIP_DEFLATED) as z:
+            for sid, snum in stalls:
+                # reuse your existing endpoint logic
+                hist = await get_stall_history(sid, days)
+
+                # write one CSV per stall
+                s_buf = io.StringIO()
+                w = csv.writer(s_buf)
+                w.writerow(["date", "occupied_hours"])
+                for lbl, hrs in zip(hist["labels"], hist["data"]):
+                    w.writerow([lbl, hrs])   # labels are already "Aug 12, 2025"
+                z.writestr(f"lot{lot_id}_stall_{snum}_{suffix}.csv", s_buf.getvalue())
+
+        mem.seek(0)
+        headers = {"Content-Disposition": f'attachment; filename="lot{lot_id}_stall_histories_{suffix}.zip"'}
+        return StreamingResponse(mem, media_type="application/zip", headers=headers)
+
+    except Exception as e:
+        print("stall_histories_zip error:", e)
+        raise HTTPException(500, "Failed to build ZIP")
+    finally:
+        if cur: cur.close()
+        if conn: pool.putconn(conn)
 
 
 
@@ -312,11 +400,8 @@ async def get_dashboard(request: Request, lot_id: int):
     api_url = f"{request.base_url}api/stall_durations?lot_id={lot_id}"
     
     try:
-        # 3. Use httpx to make an async request to your API
-        async with httpx.AsyncClient() as client:
-            response = await client.get(api_url)
-            response.raise_for_status() # Raise an exception for bad responses (4xx or 5xx)
-            duration_data = response.json()
+        # call the existing coroutine directly
+        duration_data = await get_stall_durations(lot_id)
 
         # 4. Pass the fetched data to the Jinja2 template
         return templates.TemplateResponse("all_stalls_dashboard.html", {
@@ -421,13 +506,13 @@ async def get_stall_history(stall_id: int, days: str = "7"):
 
         if days_int is None:                      # all-time → iterate over real dates
             for dt, hours in sorted(results_by_date.items()):
-                labels.append(dt.strftime("%b %d"))
+                labels.append(dt.strftime("%b %d, %Y"))
                 data.append(round(hours, 2))
         else:                                     # existing fill-in-blanks logic
             for i in range(days_int):
                 target_date = start_of_range.date() + timedelta(days=i)
                 duration = results_by_date.get(target_date, 0)
-                labels.append(target_date.strftime("%b %d"))
+                labels.append(target_date.strftime("%b %d, %Y"))
                 data.append(round(duration, 2))
         
         # Calculate KPIs from the already-fetched data
@@ -482,39 +567,6 @@ LOGIN_HTML = """<!DOCTYPE html><html><head>
 </body></html>"""
 
 
-STREAM_HTML = """<!DOCTYPE html><html><head>
-<meta charset='utf-8'><title>Live Stream</title>
-<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
-<style>
-body{background:#f8f9fa;}
-h4{margin-bottom:2.5rem;}
-.wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
-img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
-.logout-btn{position:absolute;top:2rem;right:2rem;z-index:10;}
-</style>
-</head><body class='d-flex flex-column align-items-center py-4'>
-<a href='/logout' class='btn btn-danger logout-btn'>Logout</a>
-<h4>Live Stream</h4>
-<div class='wrap'>
-  <img id='raw' class='frame'><img id='res' class='frame'>
-</div>
-<script>
-const raw=document.getElementById('raw'), res=document.getElementById('res');
-async function poll(){
-  try{
-    const resp=await fetch('/frames',{cache:'no-store'});
-    if(resp.ok){
-      const j=await resp.json();
-      raw.src=j.raw; res.src=j.res;
-      raw.style.visibility='visible'; res.style.visibility='visible';
-    }
-  }catch(_){}
-  setTimeout(poll,200);
-}
-poll();
-</script>
-</body></html>"""
-
 # ----- Stream helper functions -----------------------------------
 def deserialize_frame(buf: bytes):
     off = 0
@@ -537,11 +589,9 @@ def img_to_b64(img: np.ndarray):
     return 'data:image/jpeg;base64,' + base64.b64encode(enc.tobytes()).decode()
 
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    if not request.session.get("authenticated"):
-        return RedirectResponse(url="/login", status_code=303)
-    return STREAM_HTML
+@app.get("/", include_in_schema=False)
+def home_redirect():
+    return RedirectResponse(url="/stream", status_code=307)
 
 # ----- Background tasks -----------------------------------------------
 async def list_consumer():

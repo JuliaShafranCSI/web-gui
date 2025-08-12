@@ -13,6 +13,10 @@
     h4{margin:2.5rem 0 1.5rem;}
     .wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
     img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
+    .logout-btn{position:absolute;top:2rem;right:2rem;z-index:10;}
+    .overlay-wrap { position: relative; flex: 1 1 50vw; max-width: 850px; }
+    .overlay-wrap > img.frame { width: 100%; height: auto; display: block; visibility: hidden; }
+    .overlay-wrap > canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   </style>
 </head>
 <body>
@@ -21,26 +25,192 @@
 
   <h4 class="text-center">Live Stream</h4>
 
-  <div class="wrap">
-    <img id="raw" class="frame">
-    <img id="res" class="frame">
-  </div>
+    <div class="wrap">
+    <div class="overlay-wrap">
+        <img id="raw" class="frame" />
+        <canvas id="raw-canvas"></canvas>
+    </div>
+
+    <div class="overlay-wrap">
+        <img id="res" class="frame" />
+        <canvas id="res-canvas"></canvas>
+    </div>
+    </div>
 
   <script>
-    const raw=document.getElementById('raw'),
-          res=document.getElementById('res');
-    async function poll(){
-      try{
-        const r = await fetch('/frames',{cache:'no-store'});
-        if(r.ok){
-          const j = await r.json();
-          raw.src = j.raw;  res.src = j.res;
-          raw.style.visibility = res.style.visibility = 'visible';
+    const RAW_IMG = document.getElementById('raw');
+    const RES_IMG = document.getElementById('res');
+    const RAW_CAN = document.getElementById('raw-canvas');
+    const RES_CAN = document.getElementById('res-canvas');
+
+    const POLL_MS = 200;
+    const SRC_W = 2592; // the original resolution width the polygons were drawn in (must match the gt_74.json)
+    const SRC_H = 1944; // the original resolution height the polygons were drawn in (must match the gt_74.json)
+
+    let shapes = []; // [{points:[[x,y],...], stall:number}]
+
+    // ------------- helpers -------------
+    function resizeCanvasToImage(img, canvas) {
+    // Match the rendered size (CSS pixels)
+    const rW = img.clientWidth;
+    const rH = img.clientHeight;
+    // Set canvas buffer to device pixels for crisp text
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.max(1, Math.round(rW * dpr));
+    canvas.height = Math.max(1, Math.round(rH * dpr));
+    canvas.style.width = rW + 'px';
+    canvas.style.height = rH + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+    return ctx;
+    }
+
+    function pointInPoly(x, y, poly) {
+    // ray casting
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i][0], yi = poly[i][1];
+        const xj = poly[j][0], yj = poly[j][1];
+        const intersect = ((yi > y) !== (yj > y)) &&
+                        (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+    }
+
+    function centroid(poly) {
+    // polygon centroid (area-weighted). Fallback to average if degenerate.
+    let x = 0, y = 0, a = 0;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [x0, y0] = poly[j], [x1, y1] = poly[i];
+        const f = x0*y1 - x1*y0;
+        a += f; x += (x0 + x1) * f; y += (y0 + y1) * f;
+    }
+    if (!a) {
+        let sx=0, sy=0; for (const [px,py] of poly){sx+=px; sy+=py;}
+        return [sx/poly.length, sy/poly.length];
+    }
+    a *= 0.5;
+    return [x/(6*a), y/(6*a)];
+    }
+
+    function scaledPolys(renderW, renderH) {
+    const sx = renderW / SRC_W;
+    const sy = renderH / SRC_H;
+    return shapes.map(s => ({
+        stall: s.stall,
+        poly: s.points.map(([x,y]) => [x * sx, y * sy])
+    }));
+    }
+
+    function drawLabel(canvas, stall, poly) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+
+    if (stall < 0 || !poly) return;
+
+    const [cx, cy] = centroid(poly);
+    ctx.font = 'bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = '#00ff00';      // green text
+    // optional thin stroke to pop on bright backgrounds:
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeText(String(stall), cx, cy - 4);
+    ctx.fillText(String(stall), cx, cy - 4);
+    }
+
+    // ------------- hover logic per image -------------
+    function attachHover(img, canvas) {
+    let scaled = [];
+    let active = -1, activePoly = null;
+    let lastW = 0, lastH = 0;
+
+    const rebuild = () => {
+        const ctx = resizeCanvasToImage(img, canvas);
+        scaled = scaledPolys(img.clientWidth, img.clientHeight);
+        // after resizing, re-draw the current label if any
+        drawLabel(canvas, active, activePoly);
+    };
+
+    const onMove = (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const y = ev.clientY - rect.top;
+        let newActive = -1, newPoly = null;
+        for (let i = 0; i < scaled.length; i++) {
+        if (pointInPoly(x, y, scaled[i].poly)) {
+            newActive = scaled[i].stall; newPoly = scaled[i].poly; break;
         }
-      }catch(_){}
-      setTimeout(poll,200);
+        }
+        active = newActive; activePoly = newPoly;
+        drawLabel(canvas, active, activePoly);
+    };
+
+    const onLeave = () => {
+        active = -1; activePoly = null;
+        drawLabel(canvas, -1, null);
+    };
+
+    // Resize-aware (only clears when size truly changes)
+    const ro = new ResizeObserver(rebuild);
+    ro.observe(img);
+
+    // IMPORTANT: don't clear on every frame load
+    img.addEventListener('load', () => {
+        const w = img.clientWidth, h = img.clientHeight;
+        if (w !== lastW || h !== lastH) {
+        lastW = w; lastH = h;
+        rebuild();              // size changed → real rebuild
+        } else {
+        // size unchanged → just re-draw current label
+        drawLabel(canvas, active, activePoly);
+        }
+    });
+
+    // initial sizing
+    rebuild();
+
+    const wrap = canvas.parentElement;
+    wrap.addEventListener('mousemove', onMove);
+    wrap.addEventListener('mouseleave', onLeave);
+    }
+
+    // ------------- data + wiring -------------
+    async function loadShapes() {
+    const resp = await fetch('/static/gt_74.json', {cache:'no-store'});
+    const j = await resp.json();
+
+    // The file has an array of shapes; if it doesn’t include stall numbers,
+    // we’ll number them 1..N in file order. If you DO have numbers, map them here.
+    const rawShapes = j.shapes || [];
+    shapes = rawShapes.map((s, idx) => ({
+        stall: (typeof s.label === 'string' && /^\d+$/.test(s.label)) ? Number(s.label) : (idx+1),
+        points: s.points
+    }));
+    }
+
+    async function start() {
+    await loadShapes();
+    attachHover(RAW_IMG, RAW_CAN);
+    attachHover(RES_IMG, RES_CAN);
+
+    // existing polling
+    async function poll(){
+        try{
+        const resp = await fetch('/frames',{cache:'no-store'});
+        if(resp.ok){
+            const j = await resp.json();
+            RAW_IMG.src = j.raw; RES_IMG.src = j.res;
+            RAW_IMG.style.visibility='visible'; RES_IMG.style.visibility='visible';
+        }
+        }catch(_){}
+        setTimeout(poll, POLL_MS);
     }
     poll();
+    }
+    start();
   </script>
 </body>
 </html>

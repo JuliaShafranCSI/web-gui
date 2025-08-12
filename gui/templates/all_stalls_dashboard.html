@@ -51,6 +51,7 @@
         .export-btn{
             display:inline-block; margin:12px 0 0;
             padding:10px 18px; font-weight:600; text-decoration:none;
+            margin-bottom: 30px;
             color:#fff; background:#3182ce; border-radius:6px;
             transition: background-color 0.15s ease;
         }
@@ -65,19 +66,42 @@
     <div class="header">🅿️ Parking Dashboard</div>
     
     <div class="main-display">
-        <a  href="/api/stall_durations_csv?lot_id={{ lot_id }}"
-            class="export-btn">⬇ Export</a>
-        
-        <div class="chart-title">Available Spots for Lot #{{lot_id}} (Today)</div>
-        <div class="chart-container">
-            <canvas id="availabilityChart"></canvas>
-        </div>
-        <hr style="margin: 40px 0;">
-        <div class="chart-title">Parking Duration for Lot #{{lot_id}} (Today)</div>
-        <div class="chart-container" id="durationChartContainer">
-            <canvas id="allStallsChart"></canvas>
-        </div>
+
+    <!-- ─── Available-spots section ─────────────────────────────── -->
+    <div class="d-flex align-items-center mb-2 mt-3 position-relative">
+        <!-- centered heading -->
+        <h5 class="w-100 text-center m-0 fw-bold">
+            Available Spots for Lot #{{ lot_id }} (Today)
+        </h5>
+
+        <!-- Export button pinned to the right -->
+        <a href="/api/availability_today_csv?lot_id={{ lot_id }}"
+            class="export-btn position-absolute end-2">⬇ Export</a>
     </div>
+
+    <div class="chart-container mb-4">
+        <canvas id="availabilityChart"></canvas>
+    </div>
+
+    <hr style="margin: 40px 0;">
+
+    <!-- ─── Parking-duration section ────────────────────────────── -->
+    <div class="d-flex align-items-center mb-2 position-relative">
+        <h5 class="w-100 text-center m-0 fw-bold">
+            Parking Duration for Lot #{{ lot_id }} (Today)
+        </h5>
+
+        <a href="/api/stall_durations_csv?lot_id={{ lot_id }}"
+            class="export-btn position-absolute end-2">⬇ Export</a>
+    </div>
+
+    <div class="chart-container" id="durationChartContainer">
+        <canvas id="allStallsChart"></canvas>
+    </div>
+
+    </div><!-- /.main-display -->
+
+
 </div>
 
 <script>
