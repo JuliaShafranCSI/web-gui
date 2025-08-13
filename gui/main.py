@@ -169,7 +169,7 @@ async def get_all_stall_numbers(lot_id: int = 1):
 
 @app.get("/api/availability/today")
 async def get_availability_today(lot_id: int):
-    """API endpoint to get the number of available spots throughout today."""
+    """API endpoint to get the number of available spots throughout today, in 30-min intervals."""
     conn = None
     cur = None
     local_tz = zoneinfo.ZoneInfo("America/Edmonton")
@@ -178,22 +178,57 @@ async def get_availability_today(lot_id: int):
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
     end_of_day_utc = start_of_day_utc + timedelta(days=1)
 
-    sql = """SELECT available_stalls, total_stalls, timestamp from public.availabilitysnapshots
-    WHERE lot_id = %s 
-    AND timestamp >= %s
-    AND timestamp < %s
-    ORDER BY timestamp ASC
+    sql = """
+    WITH params AS (
+        SELECT %s::timestamptz AS start_utc,
+               %s::timestamptz AS end_utc
+    ),
+    grid AS (
+        SELECT gs AS ts_utc
+        FROM params, generate_series(
+            (SELECT start_utc FROM params),
+            (SELECT end_utc   FROM params) - interval '30 minutes',
+            interval '30 minutes'
+        ) gs
+    ),
+    snap AS (
+        SELECT
+            timestamp AT TIME ZONE 'UTC' AS ts_utc,
+            array_length(available_stalls, 1) AS avail
+        FROM public.availabilitysnapshots
+        WHERE lot_id = %s
+          AND timestamp >= (SELECT start_utc FROM params)
+          AND timestamp <  (SELECT end_utc   FROM params)
+    ),
+    binned AS (
+        SELECT
+            date_trunc('hour', ts_utc)
+              + floor(extract(minute from ts_utc)/30) * interval '30 minutes' AS bin_utc,
+            avail,
+            ts_utc,
+            row_number() OVER (
+                PARTITION BY date_trunc('hour', ts_utc)
+                            + floor(extract(minute from ts_utc)/30) * interval '30 minutes'
+                ORDER BY ts_utc DESC
+            ) AS rn
+        FROM snap
+    )
+    SELECT g.ts_utc, b.avail
+    FROM grid g
+    LEFT JOIN binned b
+      ON b.bin_utc = g.ts_utc AND b.rn = 1
+    ORDER BY g.ts_utc;
     """
 
     try:
         conn = pool.getconn()
         cur = conn.cursor()
-        cur.execute(sql, (lot_id, start_of_day_utc, end_of_day_utc))
+        cur.execute(sql, (start_of_day_utc, end_of_day_utc, lot_id))
         rows = cur.fetchall()
         chart_data = {
-            # convert each row[2] (UTC) to Alberta time first
-            "labels": [row[2].astimezone(local_tz).strftime("%I:%M %p") for row in rows],
-            "data": [len(row[0]) for row in rows]
+            "labels": [ts.astimezone(local_tz).strftime("%I:%M %p") for ts, _ in rows],
+            # Replace None with 0 so empty bins show as 0 available spots
+            "data": [(avail if avail is not None else 0) for _, avail in rows]
         }
         return chart_data
     except Exception as e:
@@ -224,6 +259,7 @@ async def get_stall_durations(lot_id: int):
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
     end_of_day_utc = start_of_day_utc + timedelta(days=1)
     
+    cap_utc = min(datetime.now(timezone.utc), end_of_day_utc)
 
     # test_date = date(2025, 7, 30) # For example, yesterday
     # start_of_day = datetime.combine(test_date, datetime.min.time())
@@ -234,12 +270,21 @@ async def get_stall_durations(lot_id: int):
         SELECT 
             s.stall_id,
             s.stall_number,
-            COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0) as total_duration
+            COALESCE(
+                SUM(
+                    EXTRACT(
+                        EPOCH FROM (
+                            COALESCE(LEAST(ps.exit_timestamp, %s), %s) - ps.entry_timestamp
+                        )
+                    )
+                ) / 3600.0,
+            0) AS total_duration
         FROM public.stalls s
-        LEFT JOIN public.parkingsessions ps ON s.stall_id = ps.stall_id
-                                            AND ps.entry_timestamp >= %s 
-                                            AND ps.entry_timestamp < %s
-                                            AND ps.exit_timestamp IS NOT NULL
+        LEFT JOIN public.parkingsessions ps 
+            ON s.stall_id = ps.stall_id
+            AND ps.entry_timestamp >= %s
+            AND ps.entry_timestamp < %s
+            -- no exit filter: we include ongoing sessions
         WHERE s.lot_id = %s
         GROUP BY s.stall_id, s.stall_number
         ORDER BY CAST(s.stall_number AS INTEGER);
@@ -248,7 +293,7 @@ async def get_stall_durations(lot_id: int):
     try:
         conn = pool.getconn()
         cur = conn.cursor()
-        cur.execute(sql, (start_of_day_utc, end_of_day_utc, lot_id))
+        cur.execute(sql, (cap_utc, cap_utc, start_of_day_utc, end_of_day_utc, lot_id))
         rows = cur.fetchall()
 
         stalls_data = [

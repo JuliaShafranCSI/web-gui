@@ -56,6 +56,9 @@
             transition: background-color 0.15s ease;
         }
         .export-btn:hover{ background:#225ea8; }
+        #availabilityChartContainer {
+            height: 300px; /* Increase this value for taller chart */
+        }
     </style>
 </head>
 <body>
@@ -79,7 +82,7 @@
             class="export-btn position-absolute end-2">⬇ Export</a>
     </div>
 
-    <div class="chart-container mb-4">
+    <div class="chart-container mb-4" id="availabilityChartContainer">
         <canvas id="availabilityChart"></canvas>
     </div>
 
@@ -166,40 +169,41 @@
             availabilityChart.destroy();
         }
         availabilityChart = new Chart(availabilityCanvas, {
-            type: 'line', // This chart will be a line chart
+            type: 'bar', // ← changed from 'line' to 'bar'
             data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Available Spots',
-                    data: data,
-                    borderColor: '#48bb78',
-                    tension: 0.1,
-                    fill: false
-                }]
+            labels: labels,            // already uniform after backend binning
+            datasets: [{
+                label: 'Available Spots',
+                data: data,
+                borderWidth: 1           // bars; you can add backgroundColor if you want
+            }]
             },
-            options: { plugins: { legend: { display: false } }, 
-                        scales: {
-                            x: { // Configuration for the X-axis
-                                title: {
-                                    display: true,      // Show the label
-                                    text: 'Timestamp' // The text for the label
-                                }
-                            },
-                            y: { // Optional: You can also add a Y-axis label
-                                title: {
-                                    display: true,
-                                    text: 'Available Spots'
-                                },
-                                ticks: {
-                                // This forces the tick values to be integers
-                                precision: 0
-                                }
-                            }
-                        }
-        
-        }
+            options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: {
+                // Category axis (labels are already strings like "01:00 PM")
+                title: { display: true, text: 'Time' },
+                ticks: {
+                    autoSkip: true,
+                    maxRotation: 0,
+                    // On a 10-min grid, this shows ~1 tick per hour (every 6th)
+                    //callback: (value, idx) => (idx % 6 === 0 ? labels[idx] : '')
+                    callback: (value, idx) => labels[idx] // show all
+                }
+                },
+                y: {
+                beginAtZero: true,
+                title: { display: true, text: 'Available Spots' },
+                ticks: { precision: 0 } // integers only
+                }
+            }
+            }
         });
     }
+
     // Data is injected by the server here, assuming your API returns a list of objects
     const serverData = {{ duration_data | tojson }};
 
