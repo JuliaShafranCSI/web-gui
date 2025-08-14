@@ -176,54 +176,62 @@ async def get_availability_today(lot_id: int):
     local_now = datetime.now(local_tz)
     start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
-    end_of_day_utc = start_of_day_utc + timedelta(days=1)
+    now_utc = datetime.now(timezone.utc)
+    end_of_day_utc = now_utc
 
     sql = """
-    WITH params AS (
-        SELECT %s::timestamptz AS start_utc,
-               %s::timestamptz AS end_utc
+    WITH bounds AS (
+        SELECT
+            %s::timestamptz AS start_utc,
+            %s::timestamptz AS now_utc
+    ),
+    end_bin AS (
+        SELECT
+            date_trunc('hour', now_utc)
+            + floor(extract(minute FROM now_utc)/30) * interval '30 minutes' AS end_bin_utc
+        FROM bounds
     ),
     grid AS (
         SELECT gs AS ts_utc
-        FROM params, generate_series(
-            (SELECT start_utc FROM params),
-            (SELECT end_utc   FROM params) - interval '30 minutes',
-            interval '30 minutes'
-        ) gs
+        FROM bounds, end_bin,
+            generate_series(
+                (SELECT start_utc   FROM bounds),
+                (SELECT end_bin_utc FROM end_bin),      -- inclusive current bin
+                interval '30 minutes'
+            ) gs
     ),
     snap AS (
         SELECT
             timestamp AT TIME ZONE 'UTC' AS ts_utc,
             array_length(available_stalls, 1) AS avail
-        FROM public.availabilitysnapshots
+        FROM public.availabilitysnapshots, bounds
         WHERE lot_id = %s
-          AND timestamp >= (SELECT start_utc FROM params)
-          AND timestamp <  (SELECT end_utc   FROM params)
+            AND timestamp >= (SELECT start_utc FROM bounds)
+            AND timestamp <  (SELECT now_utc   FROM bounds)  -- don't look into the future
     ),
     binned AS (
         SELECT
             date_trunc('hour', ts_utc)
-              + floor(extract(minute from ts_utc)/30) * interval '30 minutes' AS bin_utc,
+            + floor(extract(minute FROM ts_utc)/30) * interval '30 minutes' AS bin_utc,
             avail,
             ts_utc,
             row_number() OVER (
-                PARTITION BY date_trunc('hour', ts_utc)
-                            + floor(extract(minute from ts_utc)/30) * interval '30 minutes'
-                ORDER BY ts_utc DESC
+            PARTITION BY date_trunc('hour', ts_utc)
+                        + floor(extract(minute FROM ts_utc)/30) * interval '30 minutes'
+            ORDER BY ts_utc DESC
             ) AS rn
         FROM snap
     )
     SELECT g.ts_utc, b.avail
     FROM grid g
-    LEFT JOIN binned b
-      ON b.bin_utc = g.ts_utc AND b.rn = 1
+    LEFT JOIN binned b ON b.bin_utc = g.ts_utc AND b.rn = 1
     ORDER BY g.ts_utc;
     """
 
     try:
         conn = pool.getconn()
         cur = conn.cursor()
-        cur.execute(sql, (start_of_day_utc, end_of_day_utc, lot_id))
+        cur.execute(sql, (start_of_day_utc, now_utc, lot_id))
         rows = cur.fetchall()
         chart_data = {
             "labels": [ts.astimezone(local_tz).strftime("%I:%M %p") for ts, _ in rows],
@@ -480,112 +488,150 @@ async def get_single_stall_dashboard(request: Request, stall_id: int):
 
 @app.get("/api/stall-history")
 async def get_stall_history(stall_id: int, days: str = "7"):
-    """Gets the parking duration history for a single stall over a number of days."""
-    conn = None
-    cur = None
+    """
+    Daily occupied hours for a stall, correctly including today and sessions
+    that cross midnight / are still open.
+    """
+    conn = cur = None
 
+    # --- Parse days arg ---
     if days == "all":
-        days_int = None                       # sentinel → unlimited
+        days_int = None
     else:
         try:
-            days_int = int(days)              # "7" → 7
+            days_int = int(days)
         except ValueError:
             raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
         if days_int not in (7, 30, 365):
             raise HTTPException(400, "days must be 7, 30, 365 or 'all'")
 
-    # 1. Define the overall date range for the query
-    # today = date.today()
-    # start_date = today - timedelta(days=days - 1)
-    # end_date = today + timedelta(days=1)
-
-
-    
-    # start_of_range = datetime.combine(start_date, datetime.min.time())
-    # end_of_range = datetime.combine(end_date, datetime.min.time())
-
     local_tz = zoneinfo.ZoneInfo("America/Edmonton")
     local_now = datetime.now(local_tz)
-    
-    if days_int is None:                      # all-time → no lower bound
-        start_of_range = None                 # handled in SQL below
-    else:
-        start_of_day_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_int - 1)
-        start_of_range = start_of_day_local.astimezone(timezone.utc)
+    # end bound = now (local) -> convert to UTC once for SQL
+    end_utc = local_now.astimezone(timezone.utc)
 
-    end_of_range = local_now
-    
-    if days_int is None:
-        sql = """
-            SELECT DATE(ps.entry_timestamp),
-                   COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
-            FROM public.parkingsessions ps
-            WHERE ps.stall_id = %s
-            AND ps.entry_timestamp < %s
-            GROUP BY DATE(ps.entry_timestamp)
-            ORDER BY DATE(ps.entry_timestamp);
-        """
-        params = (stall_id, end_of_range)
-    else:
-        sql = """
-            SELECT DATE(ps.entry_timestamp),
-                   COALESCE(SUM(EXTRACT(EPOCH FROM (ps.exit_timestamp - ps.entry_timestamp))) / 3600.0, 0)
-            FROM public.parkingsessions ps
-            WHERE ps.stall_id = %s
-            AND ps.entry_timestamp >= %s
-            AND ps.entry_timestamp < %s
-            GROUP BY DATE(ps.entry_timestamp)
-            ORDER BY DATE(ps.entry_timestamp);
-        """
-        params = (stall_id, start_of_range, end_of_range)
-    
     try:
         conn = pool.getconn()
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        rows = cur.fetchall()
+        cur  = conn.cursor()
 
-        # 3. Process the results, filling in days with no data
-        results_by_date = {row[0]: row[1] for row in rows}
-        labels, data = [], []
+        # Determine start of range (local midnight) based on days/all
+        if days_int is None:
+            # all-time: start from the day of the earliest session (local)
+            cur.execute("""
+                SELECT MIN((entry_timestamp AT TIME ZONE %s)::date)
+                FROM public.parkingsessions
+                WHERE stall_id = %s
+            """, ("America/Edmonton", stall_id))
+            min_local_date = cur.fetchone()[0]
+            if min_local_date is None:
+                # no data at all -> return a single "today" zero
+                return {
+                    "labels": [local_now.date().strftime("%b %d, %Y")],
+                    "data":   [0.0],
+                    "kpi":    {"total":"0.0 hrs","avg":"0.0 hrs","busiest":"N/A"}
+                }
+            start_local_dt = datetime(min_local_date.year, min_local_date.month, min_local_date.day,
+                                      tzinfo=local_tz)
+        else:
+            # last N days including today: start at local midnight N-1 days ago
+            start_local_dt = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                              - timedelta(days=days_int - 1))
 
-        if days_int is None:                      # all-time → iterate over real dates
-            for dt, hours in sorted(results_by_date.items()):
-                labels.append(dt.strftime("%b %d, %Y"))
-                data.append(round(hours, 2))
-        else:                                     # existing fill-in-blanks logic
-            for i in range(days_int):
-                target_date = start_of_range.date() + timedelta(days=i)
-                duration = results_by_date.get(target_date, 0)
-                labels.append(target_date.strftime("%b %d, %Y"))
-                data.append(round(duration, 2))
-        
-        # Calculate KPIs from the already-fetched data
-        period_len = (days_int if days_int is not None else len(data)) or 1
+        start_utc = start_local_dt.astimezone(timezone.utc)
 
-        total_duration = sum(data)
-        avg_duration   = total_duration / period_len
+        # SQL: build per-day grid (UTC based), intersect with sessions, sum overlaps
+        sql = """
+        WITH bounds AS (
+            SELECT %s::timestamptz AS start_utc,
+                   %s::timestamptz AS end_utc
+        ),
+        day_grid AS (
+            SELECT generate_series(
+                       (SELECT start_utc FROM bounds),
+                       (SELECT end_utc   FROM bounds),
+                       interval '1 day'
+                   ) AS day_start_utc
+        ),
+        sess AS (
+            SELECT
+              ps.entry_timestamp                         AS entry_utc,
+              COALESCE(ps.exit_timestamp,
+                       (SELECT end_utc FROM bounds))      AS exit_utc
+            FROM public.parkingsessions ps, bounds b
+            WHERE ps.stall_id = %s
+              -- session intersects the [start,end) window:
+              AND ps.entry_timestamp <  b.end_utc
+              AND COALESCE(ps.exit_timestamp, b.end_utc) > b.start_utc
+        ),
+        perday AS (
+            SELECT
+                g.day_start_utc,
+                CASE
+                WHEN s.entry_utc IS NULL THEN interval '0 second'
+                ELSE GREATEST(
+                        interval '0 second',
+                        LEAST(s.exit_utc, g.day_start_utc + interval '1 day')
+                        - GREATEST(s.entry_utc, g.day_start_utc)
+                    )
+                END AS overlap
+            FROM day_grid g
+            LEFT JOIN sess s
+                ON s.entry_utc < g.day_start_utc + interval '1 day'
+            AND s.exit_utc  > g.day_start_utc
+            )
+        SELECT
+          ((day_start_utc AT TIME ZONE 'America/Edmonton')::date) AS local_date,
+          COALESCE(SUM(EXTRACT(EPOCH FROM overlap)),0)/3600.0     AS hours
+        FROM perday
+        GROUP BY local_date
+        ORDER BY local_date;
+        """
 
-        busiest_day_val    = max(data) if data else 0
-        busiest_day_index  = data.index(busiest_day_val) if busiest_day_val > 0 else -1
-        busiest_day_label  = (
-            labels[busiest_day_index] if busiest_day_index != -1 else "N/A"
-        )
+        cur.execute(sql, (start_utc, end_utc, stall_id))
+        rows = cur.fetchall()  # [(date, hours), ...]
+
+        # Build a full continuous local date range (ensures today appears)
+        dates_to_hours = {d: float(h) for d, h in rows}
+        last_local_date = local_now.date()
+
+        # inclusive range
+        all_dates = []
+        d = start_local_dt.date()
+        while d <= last_local_date:
+            all_dates.append(d)
+            d += timedelta(days=1)
+
+        labels = [d.strftime("%b %d, %Y") for d in all_dates]
+        data   = [round(dates_to_hours.get(d, 0.0), 2) for d in all_dates]
+
+        # KPIs
+        period_len = max(1, len(data))
+        total_duration = round(sum(data), 1)
+        avg_duration   = round(total_duration / period_len, 1)
+        if data:
+            busiest_val = max(data)
+            busiest_idx = data.index(busiest_val) if busiest_val > 0 else -1
+            busiest_lbl = labels[busiest_idx] if busiest_idx >= 0 else "N/A"
+        else:
+            busiest_lbl = "N/A"
 
         return {
-            "labels": labels, "data": data,
+            "labels": labels,
+            "data":   data,
             "kpi": {
-                "total": f"{round(total_duration, 1)} hrs",
-                "avg": f"{round(avg_duration, 1)} hrs",
-                "busiest": busiest_day_label
+                "total":   f"{total_duration} hrs",
+                "avg":     f"{avg_duration} hrs",
+                "busiest": busiest_lbl
             }
         }
+
     except Exception as e:
-        print(f"Database error: {e}")
+        print("get_stall_history error:", e)
         raise HTTPException(status_code=500, detail="Could not retrieve data")
     finally:
         if cur: cur.close()
         if conn: pool.putconn(conn)
+
 
 # ---- HTML snippets ----
 LOGIN_HTML = """<!DOCTYPE html><html><head>
