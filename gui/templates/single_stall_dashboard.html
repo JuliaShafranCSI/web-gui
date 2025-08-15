@@ -82,8 +82,18 @@
     </div>
 
     <div class="main-display">
-        <div id="stall-header" class="stall-header">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div id="stall-header" class="stall-header"></div>
+
+            <div class="d-flex align-items-center gap-2">
+                <span class="controls-label me-1">Units:</span>
+                <select id="units-selector" class="stall-selector" style="min-width:110px">
+                <option value="hours" selected>Hours</option>
+                <option value="percent">%</option>
+                </select>
             </div>
+        </div>
+
 
         <div class="kpi-container">
             <div class="kpi-card"><div class="title">Total Duration</div><div class="value" id="kpi-total">...</div></div>
@@ -105,6 +115,9 @@
     const chartCanvas = document.getElementById('occupancyChart').getContext('2d');
     const exportBtn = document.getElementById('export-csv-btn');
     const exportAllZipBtn = document.getElementById('export-all-zip-btn');
+    const unitsSelector = document.getElementById('units-selector');
+    let unitsMode = 'hours';          // 'hours' | 'percent'
+    let lastHistory = null;           // cache last fetched payload
 
     const TIMEFRAMES = {
     'btn-7days'    : 7,      // 1 week
@@ -118,23 +131,43 @@
     let currentStallId = null;
     let currentTimeframe = TIMEFRAMES['btn-7days']; // Default to 7 days
 
+    function toDisplaySeries(hoursArr) {
+        if (unitsMode === 'hours') return hoursArr;
+        return hoursArr.map(h => +(h / 24 * 100).toFixed(1));
+    }
+    function formatKpis(kpi, daysCount, hoursArr) {
+        if (unitsMode === 'hours') return { total: kpi.total, avg: kpi.avg, busiest: kpi.busiest };
+        const sumH = hoursArr.reduce((a,b)=>a+b,0);
+        const totalPct = daysCount ? (sumH / (daysCount*24)) * 100 : 0;
+        const avgPct   = daysCount ? (sumH/daysCount/24) * 100 : 0;
+        return { total: `${totalPct.toFixed(1)} %`, avg: `${avgPct.toFixed(1)} %`, busiest: kpi.busiest };
+    }
+
     // --- Chart Rendering ---
-    function renderChart(data, labels) {
-        if (occupancyChart) {
-            occupancyChart.destroy();
-        }
+    function renderChart(hoursData, labels) {
+        if (occupancyChart) occupancyChart.destroy();
+        const displayData = toDisplaySeries(hoursData);
+        const yTitle = (unitsMode === 'hours') ? 'Hours' : 'Occupancy %';
+        const dsLabel = (unitsMode === 'hours') ? 'Occupied (hrs)' : 'Occupied (%)';
+        const suggestedMax = (unitsMode === 'percent') ? 100 : undefined;
+
         occupancyChart = new Chart(chartCanvas, {
             type: 'bar',
-            data: {
-                labels: labels,
-                datasets: [{ label: 'Occupied Hours', data: data, backgroundColor: '#4299e1' }]
-            },
+            data: { labels, datasets: [{ label: dsLabel, data: displayData, backgroundColor: '#4299e1' }] },
             options: {
-                scales: { y: { beginAtZero: true, title: { display: true, text: 'Hours' } } },
-                plugins: { legend: { display: false } }
+            scales: {
+                y: {
+                beginAtZero: true,
+                suggestedMax,
+                title: { display: true, text: yTitle },
+                ticks: { callback: v => (unitsMode === 'percent' ? `${v}%` : v) }
+                }
+            },
+            plugins: { legend: { display: false } }
             }
         });
     }
+
 
     // --- Data Fetching and UI Update ---
     async function updateDashboard() {
@@ -153,10 +186,10 @@
             if (!response.ok) throw new Error('Network response failed');
             const data = await response.json();
 
-            // Update KPIs
-            document.getElementById('kpi-total').textContent = data.kpi.total;
-            document.getElementById('kpi-avg').textContent = data.kpi.avg;
-            document.getElementById('kpi-busiest').textContent = data.kpi.busiest;
+            // // Update KPIs
+            // document.getElementById('kpi-total').textContent = data.kpi.total;
+            // document.getElementById('kpi-avg').textContent = data.kpi.avg;
+            // document.getElementById('kpi-busiest').textContent = data.kpi.busiest;
 
             // Update Titles
             const stallText = stallSelector.options[stallSelector.selectedIndex].text;
@@ -169,6 +202,12 @@
             document.getElementById('stall-header').textContent = `Stall ${stallText}`;
             document.getElementById('chart-title').textContent  = `Daily Occupancy for ${stallText} (${tfLabel})`;
             
+            lastHistory = data;
+            const kpis = formatKpis(data.kpi, data.data.length, data.data);
+            document.getElementById('kpi-total').textContent = kpis.total;
+            document.getElementById('kpi-avg').textContent = kpis.avg;
+            document.getElementById('kpi-busiest').textContent = kpis.busiest;
+
             // Render Chart
             renderChart(data.data, data.labels);
         } catch (error) {
@@ -259,6 +298,18 @@
         exportAllZipBtn.href = buildBulkExportZipUrl();
         });
     }
+
+    unitsSelector.addEventListener('change', () => {
+        unitsMode = unitsSelector.value;
+        if (!lastHistory) return;
+
+        const kpis = formatKpis(lastHistory.kpi, lastHistory.data.length, lastHistory.data);
+        document.getElementById('kpi-total').textContent   = kpis.total;
+        document.getElementById('kpi-avg').textContent     = kpis.avg;
+        document.getElementById('kpi-busiest').textContent = kpis.busiest;
+
+        renderChart(lastHistory.data, lastHistory.labels);
+    });
     
     // --- Initial Load ---
     document.addEventListener('DOMContentLoaded', () => {
