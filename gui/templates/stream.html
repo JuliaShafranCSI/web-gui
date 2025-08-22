@@ -11,12 +11,12 @@
   <style>
     body{background:#f8f9fa; margin:0; padding-top:64px;} /* keep below fixed bar */
     h4{margin:2.5rem 0 1.5rem;}
-    .wrap{display:flex;justify-content:space-evenly;padding:0 2vw;width:100%;}
+    .wrap{display:flex;justify-content:center;align-items:flex-end;gap:12px;padding-inline: clamp(8px,1vw,24px);width:100%;}
     img.frame{flex:1 1 50vw;max-width:850px;border:1px solid #ccc;visibility:hidden}
     .logout-btn{position:absolute;top:2rem;right:2rem;z-index:10;}
     .overlay-wrap { position: relative; flex: 1 1 50vw; max-width: 850px; }
     .overlay-wrap > img.frame { width: 100%; height: auto; display: block; visibility: hidden; }
-    .overlay-wrap > canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .overlay-wrap > canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; visibility:hidden;}
   </style>
 </head>
 <body>
@@ -46,8 +46,22 @@
     const POLL_MS = 200;
     const SRC_W = 2592; // the original resolution width the polygons were drawn in (must match the gt_74.json)
     const SRC_H = 1944; // the original resolution height the polygons were drawn in (must match the gt_74.json)
+    const FRAME_AR = SRC_W / SRC_H; // frame (left pane) aspect ratio
+
+    const MAP_SRC_W = 468;
+    const MAP_SRC_H = 584;
+    const MAP_AR    = MAP_SRC_W / MAP_SRC_H;   // ≈ 0.801369
+    const LABEL_SHIFT_X = -12; // left nudge
+    const LABEL_ABOVE_PX = -5;  // how many pixels ABOVE the dot
+
+    // const CAM_LABEL_SHIFT_X = -6; // frames - left nudge
+    // CAM_LABEL_ABOVE_PX = 4;  // frames - how many pixels ABOVE the dot
+
+    // const MAP_LABEL_SHIFT_X = -12; // top-down map - left nudge
+    // MAP_LABEL_ABOVE_PX = -5;  // top-down map - how many pixels ABOVE the dot
 
     let shapes = []; // [{points:[[x,y],...], stall:number}]
+    let mapShapes = [];        // [{points:[[x,y],...], stall:number}]
 
     // ------------- helpers -------------
     function resizeCanvasToImage(img, canvas) {
@@ -95,30 +109,45 @@
     }
 
     function scaledPolys(renderW, renderH) {
-    const sx = renderW / SRC_W;
-    const sy = renderH / SRC_H;
-    return shapes.map(s => ({
-        stall: s.stall,
-        poly: s.points.map(([x,y]) => [x * sx, y * sy])
-    }));
+        const sx = renderW / SRC_W;
+        const sy = renderH / SRC_H;
+        return shapes.map(s => ({
+            stall: s.stall,
+            poly: s.points.map(([x,y]) => [x * sx, y * sy])
+        }));
+    }
+
+    function scaledPolysFrom(shapesArr, srcW, srcH, renderW, renderH, offsetX = 0, offsetY = 0) {
+        const sx = renderW / srcW;
+        const sy = renderH / srcH;
+        return shapesArr.map(s => ({
+            stall: s.stall,
+            poly: s.points.map(([x,y]) => [x * sx + offsetX, y * sy + offsetY])
+        }));
     }
 
     function drawLabel(canvas, stall, poly) {
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+        // Skip drawing if the paired image is hidden or not loaded yet
+        const img = canvas.previousElementSibling; // <img> just before this canvas
+        if (!img || img.style.visibility === 'hidden' || !img.complete || !img.naturalWidth) return;
 
-    if (stall < 0 || !poly) return;
+        if (stall < 0 || !poly) return;
 
-    const [cx, cy] = centroid(poly);
-    ctx.font = 'bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillStyle = '#00ff00';      // green text
-    // optional thin stroke to pop on bright backgrounds:
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-    ctx.strokeText(String(stall), cx, cy - 4);
-    ctx.fillText(String(stall), cx, cy - 4);
+        const [cx, cy] = centroid(poly);
+        const x = cx + LABEL_SHIFT_X;
+        const y = cy - LABEL_ABOVE_PX;   // still above the dot, but lower than before
+
+        ctx.font = 'bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';     // text sits above y
+        ctx.fillStyle = '#00ff00';
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+
+        ctx.strokeText(String(stall), x, y);
+        ctx.fillText(String(stall), x, y);
     }
 
     // ------------- hover logic per image -------------
@@ -128,8 +157,36 @@
     let lastW = 0, lastH = 0;
 
     const rebuild = () => {
-        const ctx = resizeCanvasToImage(img, canvas);
+        resizeCanvasToImage(img, canvas);
+        if (img === RES_IMG) {
+        // Composite: same height for both panes; widths follow ARs.
+        // Total AR across = FRAME_AR (camera) + MAP_AR (top-down)
+        let leftW, rightW;
+        if (img.naturalWidth && img.naturalHeight) {
+        // camera pane width in the composite = Hcomp * FRAME_AR
+        const leftFrac = Math.min(1, (img.naturalHeight * FRAME_AR) / img.naturalWidth);
+        leftW  = img.clientWidth * leftFrac;
+        rightW = img.clientWidth - leftW;
+        } else {
+        // early fallback before natural sizes are known
+        leftW  = Math.min(img.clientWidth, img.clientHeight * FRAME_AR);
+        rightW = Math.max(0, img.clientWidth - leftW);
+        }
+
+        // 1) camera shapes → left pane (same as before)
+        const leftScaled = scaledPolysFrom(shapes, SRC_W, SRC_H, leftW, img.clientHeight, /*offsetX*/ 0);
+
+        // 2) map shapes → right pane (if loaded)
+        let rightScaled = [];
+        if (mapShapes.length && MAP_SRC_W && MAP_SRC_H && rightW > 0) {
+            rightScaled = scaledPolysFrom(mapShapes, MAP_SRC_W, MAP_SRC_H, rightW, img.clientHeight, /*offsetX*/ leftW);
+        }
+        // Merge both sets for hover/labels
+        scaled = leftScaled.concat(rightScaled);
+        } else {
+        // RAW image: just scale camera shapes to the whole image
         scaled = scaledPolys(img.clientWidth, img.clientHeight);
+        }
         // after resizing, re-draw the current label if any
         drawLabel(canvas, active, activePoly);
     };
@@ -179,37 +236,119 @@
 
     // ------------- data + wiring -------------
     async function loadShapes() {
-    const resp = await fetch('/static/gt_74.json', {cache:'no-store'});
-    const j = await resp.json();
+        const resp = await fetch('/static/gt_74.json', {cache:'no-store'});
+        const j = await resp.json();
 
-    // The file has an array of shapes; if it doesn’t include stall numbers,
-    // we’ll number them 1..N in file order. If you DO have numbers, map them here.
-    const rawShapes = j.shapes || [];
-    shapes = rawShapes.map((s, idx) => ({
-        stall: (typeof s.label === 'string' && /^\d+$/.test(s.label)) ? Number(s.label) : (idx+1),
-        points: s.points
-    }));
+        const rawShapes = j.shapes || [];
+        shapes = rawShapes.map((s, idx) => ({
+            stall: idx,                 // force zero-based 0..N-1
+            points: s.points
+        }));
+
+        // --- load top-down map shapes ---
+        try {
+        const resp2 = await fetch('/static/Brentwood_parking_lot_top_down_map_74.json', { cache: 'no-store' });
+        if (resp2.ok) {
+            const jm = await resp2.json();
+            const ms = jm.shapes || [];
+
+            // helper: turn a single point into a small diamond polygon (in source pixels)
+            const inflatePoint = ([x, y], r = 10) => [[x - r, y], [x, y - r], [x + r, y], [x, y + r]];
+
+            mapShapes = ms.map((s, idx) => {
+                let pts = s.points;
+                if ((s.shape_type === 'point') || (Array.isArray(pts) && pts.length === 1)) {
+                    pts = inflatePoint(pts[0]);       // make it hoverable
+                }
+                return { stall: idx, points: pts }; // force zero-based 0..N-1
+            });
+
+            // We already know the map's native size (468x584), so don't reassign MAP_SRC_W/H.
+        } else {
+            console.warn('Top-down map JSON not found (optional):', resp2.status);
+        }
+        } catch (e) {
+        console.warn('Failed loading top-down map JSON:', e);
+        }
     }
 
     async function start() {
     await loadShapes();
     attachHover(RAW_IMG, RAW_CAN);
-    attachHover(RES_IMG, RES_CAN);
+    attachHover(RES_IMG, RES_CAN, { compositeLeft: true });
+
+    // Keep RAW width equal to the left-pane width within RES
+    const RAW_WRAP = RAW_CAN.parentElement;
+    const RES_WRAP = RES_CAN.parentElement;
+
+    function syncLayoutToComposite() {
+        // Use the actual processed image AR if we have it
+        const resAR = (RES_IMG.naturalWidth && RES_IMG.naturalHeight)
+            ? RES_IMG.naturalWidth / RES_IMG.naturalHeight
+            : (FRAME_AR + MAP_AR);
+
+        const RAW_WRAP = RAW_CAN.parentElement;
+        const RES_WRAP = RES_CAN.parentElement;
+        const WRAP = RAW_WRAP.parentElement;
+
+        const cs   = getComputedStyle(WRAP);
+        const gap  = parseFloat(cs.gap || '12') || 12;
+        const padL = parseFloat(cs.paddingLeft || '0') || 0;
+        const padR = parseFloat(cs.paddingRight || '0') || 0;
+
+        const inner = Math.max(WRAP.clientWidth - padL - padR, 0);
+        const avail = Math.max(inner - gap, 200);
+
+        // Choose ONE integer height for both images
+        let H = Math.floor(avail / (FRAME_AR + resAR));
+        if (H < 1) H = 1;
+
+        // Widths derived from that height
+        let wRaw = Math.round(H * FRAME_AR);
+        let wRes = Math.round(H * resAR);
+
+        // Fix any rounding remainder so widths fit exactly in avail
+        const diff = (wRaw + wRes) - avail;
+        if (diff > 0) (wRes >= wRaw) ? wRes -= diff : wRaw -= diff;
+        else if (diff < 0) wRes += -diff;
+
+        // Remove caps and apply fixed sizes
+        RAW_WRAP.style.maxWidth = RES_WRAP.style.maxWidth = 'none';
+        RAW_IMG.style.maxWidth  = RES_IMG.style.maxWidth  = 'none';
+
+        // FIXED HEIGHT for both panels -> eliminates subpixel drift
+        RAW_WRAP.style.height = RES_WRAP.style.height = `${H}px`;
+        RAW_IMG.style.height  = RES_IMG.style.height  = '100%';  // width auto keeps AR
+
+        // Lock widths so flex can't re-stretch
+        RAW_WRAP.style.flex = `0 0 ${wRaw}px`;
+        RES_WRAP.style.flex = `0 0 ${wRes}px`;
+    }
+
+
+    window.addEventListener('resize', syncLayoutToComposite);
+    RES_IMG.addEventListener('load', syncLayoutToComposite);
+    syncLayoutToComposite();
 
     // existing polling
     async function poll(){
         try{
-        const resp = await fetch('/frames',{cache:'no-store'});
-        if(resp.ok){
-            const j = await resp.json();
-            RAW_IMG.src = j.raw; RES_IMG.src = j.res;
-            RAW_IMG.style.visibility='visible'; RES_IMG.style.visibility='visible';
-        }
+            const resp = await fetch('/frames',{cache:'no-store'});
+            // If your backend keeps returning 200+JSON (blocking), you can keep this simple:
+            if (resp.status === 200) {
+                const j = await resp.json();
+                RAW_IMG.src = j.raw; RES_IMG.src = j.res;
+                RAW_IMG.style.visibility='visible'; RES_IMG.style.visibility='visible';
+                RAW_CAN.style.visibility='visible'; RES_CAN.style.visibility='visible';
+                // sync after sizes settle
+                syncLayoutToComposite();
+            }
         }catch(_){}
         setTimeout(poll, POLL_MS);
+        }
+        poll();
     }
-    poll();
-    }
+
     start();
   </script>
 </body>
